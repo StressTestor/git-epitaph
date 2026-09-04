@@ -12,7 +12,9 @@ DAY = 86400
 T0 = 1_700_000_000
 
 
-def git(repo: Path, *args: str, ts: int | None = None) -> str:
+def _git_env(ts: int | None) -> dict[str, str]:
+    # identity comes from the env, not global config: CI runners have none, and git
+    # checks the committer identity before it even starts a merge
     env = dict(os.environ)
     env.update(
         {
@@ -25,7 +27,18 @@ def git(repo: Path, *args: str, ts: int | None = None) -> str:
     if ts is not None:
         env["GIT_AUTHOR_DATE"] = f"{ts} +0000"
         env["GIT_COMMITTER_DATE"] = f"{ts} +0000"
-    proc = subprocess.run(["git", *args], cwd=repo, env=env, capture_output=True, text=True)
+    return env
+
+
+def git_raw(repo: Path, *args: str, ts: int | None = None) -> subprocess.CompletedProcess:
+    """Run git and return the process; for commands that are expected to fail."""
+    return subprocess.run(
+        ["git", *args], cwd=repo, env=_git_env(ts), capture_output=True, text=True
+    )
+
+
+def git(repo: Path, *args: str, ts: int | None = None) -> str:
+    proc = git_raw(repo, *args, ts=ts)
     if proc.returncode != 0:
         raise AssertionError(f"git {' '.join(args)} exited {proc.returncode}:\n{proc.stderr}")
     return proc.stdout
@@ -244,7 +257,7 @@ def _conflicting_merge(repo: Path, extra_file: str | None = None) -> str:
     (repo / "keep.py").write_text("print('still here')\n")
     git(repo, "add", "keep.py")
     git(repo, "commit", "-q", "-m", "fix: touch keep.py", ts=T0 + 31 * DAY)
-    merge = subprocess.run(["git", "merge", "purge"], cwd=repo, capture_output=True, text=True)
+    merge = git_raw(repo, "merge", "purge")
     assert merge.returncode == 1 and "CONFLICT (modify/delete)" in merge.stdout, (
         merge.stdout + merge.stderr
     )
