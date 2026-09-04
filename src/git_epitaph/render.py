@@ -63,7 +63,7 @@ def fit_path(path: str, width: int) -> str:
 def _lines_label(g: Grave) -> str:
     if not g.counted:
         return "lines not counted"
-    if g.binary or g.lines is None:
+    if g.binary:
         return "binary"
     return f"{g.lines} line{'s' if g.lines != 1 else ''}"
 

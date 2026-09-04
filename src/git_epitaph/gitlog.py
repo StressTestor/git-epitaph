@@ -1,7 +1,8 @@
 """Run `git log` once and parse it into commits with per-file status and line counts.
 
-One log pass with `--raw --numstat -M` gives both the A/M/D/R status per path and the
-number of lines a deletion removed, so we never shell out per file.
+One log pass with `--raw -M` gives the A/M/D/R status per path; adding `--numstat` also
+gives the lines a deletion removed. Line counts are the expensive half, so callers can
+skip them in the log pass and ask `deleted_lines_in` for a few specific graves instead.
 """
 
 from __future__ import annotations
@@ -122,10 +123,14 @@ def read_log(
 ) -> tuple[list[Commit], str]:
     """Oldest-first mainline history for `repo` plus git's warnings (e.g. rename limit hit).
 
-    `--first-parent` makes the walk a straight line, so a birth is always an ancestor of
-    its death and two branches adding the same path can never interleave. Each merge is
-    diffed against its first parent, so a PR lands as one net change at the merge commit,
-    and files created or kept inside a conflict resolution are visible.
+    `--first-parent` makes the walk of one ref a straight line, so a birth is always an
+    ancestor of its death and two branches adding the same path can never interleave.
+    Each merge is diffed against its first parent, so a PR lands as one net change at the
+    merge commit, and files created or kept inside a conflict resolution are visible.
+
+    With `all_refs`, every ref's first-parent chain is walked and git interleaves them by
+    commit date, so that guarantee is gone: an unmerged branch can bury or resurrect a
+    path out of order, and ages can be off.
 
     `--numstat` is ~95% of the wall time on large repos (it reads every deleted blob), so
     callers that only need counts for a handful of graves pass `count_lines=False` and
@@ -150,9 +155,23 @@ def read_log(
 
 
 def deleted_lines_in(repo: Path, sha: str, paths: list[str]) -> dict[str, int | None]:
-    """Lines removed from each of `paths` by commit `sha`, against its first parent."""
+    """Lines removed from each of `paths` by commit `sha`, against its first parent.
+
+    `--literal-pathspecs` matters: without it a path starting with `:` is pathspec magic
+    and matches nothing, and `[slug].tsx` or `*` would glob onto files nobody asked about.
+    No `-M` here, so the output never contains `{a => b}` rename shapes.
+    """
     out, _ = run_git(
-        repo, "diff-tree", "-r", "--numstat", "--no-color", f"{sha}^1", sha, "--", *paths
+        repo,
+        "--literal-pathspecs",
+        "diff-tree",
+        "-r",
+        "--numstat",
+        "--no-color",
+        f"{sha}^1",
+        sha,
+        "--",
+        *paths,
     )
     result: dict[str, int | None] = {}
     for line in out.splitlines():

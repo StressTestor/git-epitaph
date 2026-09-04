@@ -59,8 +59,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--all",
         action="store_true",
-        help="walk all refs as one timeline; a file deleted on one branch but alive on "
-        "another is reported dead",
+        help="walk every ref's first-parent chain, interleaved by date; a file deleted "
+        "on one branch but alive on another is reported dead, and ages can be off",
     )
     p.add_argument(
         "--no-lines",
@@ -85,16 +85,33 @@ def _non_negative(value: str) -> int:
     return n
 
 
-def _assert_repo(repo: Path) -> None:
-    """Accept work trees and bare repos; reject everything else before doing any work."""
+def _repo_root(repo: Path) -> Path:
+    """Resolve `repo` (a work tree, any subdirectory of one, or a bare repo) to its root.
+
+    Everything after this runs from the root: `ls-tree` limits itself to the cwd and
+    `diff-tree` pathspecs are cwd-relative, so a subdirectory argument would otherwise
+    lose living paths and miss every lazy line count.
+    """
     try:
         out, _ = run_git(repo, "rev-parse", "--is-inside-work-tree", "--is-bare-repository")
     except GitError as exc:
         if "not found on PATH" in str(exc):
             raise
         raise GitError(f"not a git repository: {repo}") from exc
-    if "true" not in out.split():
+    in_work_tree, is_bare = out.split()
+    if is_bare == "true":
+        root, _ = run_git(repo, "rev-parse", "--absolute-git-dir")
+    elif in_work_tree == "true":
+        root, _ = run_git(repo, "rev-parse", "--show-toplevel")
+    else:
         raise GitError(f"not a git repository: {repo}")
+    return Path(root.strip())
+
+
+# above this --limit, one numstat pass in the log is cheaper than a diff-tree per death
+# commit. it keys off the limit, not the shown count, because the choice has to be made
+# before the walk; a tight --path filter with a huge limit pays for the full pass.
+LAZY_LIMIT = 200
 
 
 def fill_lines(repo: Path, graves: list[Grave]) -> None:
@@ -105,8 +122,11 @@ def fill_lines(repo: Path, graves: list[Grave]) -> None:
     for sha, group in by_commit.items():
         counts = deleted_lines_in(repo, sha, [g.path for g in group])
         for g in group:
-            if g.path in counts:
-                g.set_lines(counts[g.path])
+            if g.path not in counts:
+                # both commands run from the repo root against the same first parent, so a
+                # D in the log is a D here. a miss means they disagree; guessing would hide it.
+                raise GitError(f"could not count lines for {g.path!r} in {sha[:12]}")
+            g.set_lines(counts[g.path])
 
 
 def select(graves: list[Grave], args: argparse.Namespace) -> list[Grave]:
@@ -130,12 +150,13 @@ def select(graves: list[Grave], args: argparse.Namespace) -> list[Grave]:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    repo = Path(args.repo)
     # counting lines reads every deleted blob and is ~95% of the wall time on big repos.
     # only pay for all of it when the answer needs all of it.
-    count_all = not args.no_lines and (args.limit is None or args.sort == "lines")
+    count_all = not args.no_lines and (
+        args.limit is None or args.sort == "lines" or args.limit > LAZY_LIMIT
+    )
     try:
-        _assert_repo(repo)
+        repo = _repo_root(Path(args.repo))
         commits, warnings = read_log(repo, all_refs=args.all, count_lines=count_all)
         living = living_paths(repo, all_refs=args.all)
     except GitError as exc:

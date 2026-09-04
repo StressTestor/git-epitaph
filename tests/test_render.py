@@ -26,6 +26,7 @@ def grave(path="src/old_parser.py", born=T0, died=T0 + 400 * DAY, lines=312, **k
         killer="joe",
         epitaph="refactor(core): drop legacy parser",
         lines=lines,
+        counted=True,
         risen=False,
         aliases=[],
     )
@@ -152,7 +153,7 @@ def test_text_output_survives_non_utf8_filename():
 
 
 def test_summary_counts():
-    s = summary([grave(), grave(risen=True), grave(lines=None, binary=True)])
+    s = summary([grave(), grave(risen=True), grave(lines=None)])
     assert "3 buried" in s
     assert "1 risen" in s
     assert "624 lines" in s

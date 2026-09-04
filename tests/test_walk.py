@@ -109,6 +109,19 @@ def test_missing_numstat_means_not_counted_rather_than_binary():
     assert g.counted is False
 
 
+def test_set_lines_none_means_git_called_it_binary():
+    commits = [
+        commit("a1", 0, "add", [Change("A", "x.png")]),
+        commit("d1", DAY, "rm", [Change("D", "x.png")]),
+    ]
+    (g,) = bury(commits)
+    g.set_lines(None)
+    assert g.counted is True
+    assert g.binary is True
+    g.set_lines(7)
+    assert g.binary is False and g.lines == 7
+
+
 def test_rename_of_unknown_file_keeps_birth_unknown():
     # shallow history: we never saw old.py born, so the rename must not invent a birth
     commits = [
@@ -135,8 +148,8 @@ def test_rename_or_copy_onto_a_buried_path_marks_it_risen():
 
 
 def test_living_paths_mark_graves_risen_when_replay_missed_the_return():
-    # a merge resolution kept the file; plain git log shows no diff for the merge, so the
-    # only evidence the file is alive is that it exists at HEAD
+    # the ledger says gone.py and kept.py are dead but kept.py is in the HEAD tree. on a
+    # first-parent walk that should never happen; if it does, the tree wins over the ledger
     commits = [
         commit("a1", 0, "add", [Change("A", "kept.py"), Change("A", "gone.py")]),
         commit("d1", DAY, "rm both", [Change("D", "kept.py"), Change("D", "gone.py")]),

@@ -27,15 +27,18 @@ class Grave:
     died_sha: str
     killer: str  # author of the deleting commit
     epitaph: str  # subject of the deleting commit
-    lines: int | None  # lines at death; None when binary or not counted
-    binary: bool = False  # git reported "-" for the line count
-    counted: bool = True  # False when the caller skipped line counting for speed
+    lines: int | None = None  # lines at death; None when binary or not counted
+    counted: bool = False  # True once git has been asked; False means "skipped for speed"
     risen: bool = False  # exists again later in history, or still exists at HEAD
     aliases: list[str] = field(default_factory=list)
 
+    @property
+    def binary(self) -> bool:
+        """git reported "-" for the line count."""
+        return self.counted and self.lines is None
+
     def set_lines(self, count: int | None) -> None:
         self.lines = count
-        self.binary = count is None
         self.counted = True
 
     @property
@@ -87,13 +90,10 @@ def bury(commits: list[Commit], living: set[str] | None = None) -> list[Grave]:
                     died_sha=c.sha,
                     killer=c.author,
                     epitaph=c.subject,
-                    lines=None,
+                    lines=c.deleted_lines.get(ch.path),
+                    counted=ch.path in c.deleted_lines,
                     aliases=list(birth.aliases) if birth else [],
                 )
-                if ch.path in c.deleted_lines:
-                    grave.set_lines(c.deleted_lines[ch.path])
-                else:
-                    grave.counted = False
                 graves.append(grave)
                 last_grave_for[ch.path] = grave
 

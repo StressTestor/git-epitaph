@@ -99,41 +99,110 @@ def test_stones_default_and_limit(repo: Path, capsys):
     assert "legacy.py" not in out
 
 
-def test_limit_counts_lines_lazily_but_correctly(repo: Path, capsys, monkeypatch):
+@pytest.fixture
+def git_spy(monkeypatch):
+    """Records the count_lines flag of every read_log call and the paths of every
+    deleted_lines_in call, without changing what they do."""
     import git_epitaph.cli as cli
 
-    seen: list[bool] = []
-    real = cli.read_log
+    calls = {"count_lines": [], "diff_tree_paths": []}
+    real_log, real_lines = cli.read_log, cli.deleted_lines_in
 
-    def spy(repo_, all_refs=False, count_lines=True):
-        seen.append(count_lines)
-        return real(repo_, all_refs=all_refs, count_lines=count_lines)
+    def log_spy(repo_, all_refs=False, count_lines=True):
+        calls["count_lines"].append(count_lines)
+        return real_log(repo_, all_refs=all_refs, count_lines=count_lines)
 
-    monkeypatch.setattr(cli, "read_log", spy)
-    assert main([str(repo), "--json", "--limit", "5", "--include-risen"]) == 0
-    assert seen == [False]  # the big walk skipped numstat
-    data = json.loads(capsys.readouterr().out)
-    legacy = next(g for g in data if g["path"] == "legacy.py")
-    assert legacy["lines"] == 20 and legacy["lines_counted"] is True
-    # the first img.png (the risen one) has a NUL byte, so git calls it binary
-    img = next(g for g in data if g["path"] == "img.png" and g["risen"])
+    def lines_spy(repo_, sha, paths):
+        calls["diff_tree_paths"].append(list(paths))
+        return real_lines(repo_, sha, paths)
+
+    monkeypatch.setattr(cli, "read_log", log_spy)
+    monkeypatch.setattr(cli, "deleted_lines_in", lines_spy)
+    return calls
+
+
+def test_limit_counts_only_the_shown_graves(repo: Path, capsys, git_spy):
+    assert main([str(repo), "--json", "--limit", "1", "--sort", "age"]) == 0
+    assert git_spy["count_lines"] == [False]  # the big walk skipped numstat
+    assert git_spy["diff_tree_paths"] == [["legacy.py"]]  # and only the shown grave got counted
+    (g,) = json.loads(capsys.readouterr().out)
+    assert g["path"] == "legacy.py"
+    assert g["lines"] == 20 and g["lines_counted"] is True and g["binary"] is False
+
+
+def test_lazy_count_reports_binaries_as_binary(repo: Path, capsys, git_spy):
+    # longest-lived grave including risen ones is the first img.png (12 days), whose
+    # fixture bytes contain a NUL, so git calls it binary
+    assert main([str(repo), "--json", "-n", "1", "--sort", "age", "--include-risen"]) == 0
+    assert git_spy["count_lines"] == [False]
+    assert git_spy["diff_tree_paths"] == [["img.png"]]
+    (img,) = json.loads(capsys.readouterr().out)
+    assert img["path"] == "img.png" and img["risen"] is True
     assert img["lines"] is None and img["binary"] is True and img["lines_counted"] is True
 
 
-def test_sort_by_lines_forces_a_full_count(repo: Path, capsys, monkeypatch):
+def test_subdirectory_argument_behaves_like_the_root(repo: Path, capsys):
+    sub = repo / "pkg"
+    sub.mkdir()
+    (sub / "mod.py").write_text("x = 1\ny = 2\n")
+    (sub / "__init__.py").write_text("")  # keeps the directory alive after the rm
+    git(repo, "add", "pkg")
+    git(repo, "commit", "-q", "-m", "feat: pkg", ts=T0 + 20 * DAY)
+    git(repo, "rm", "-q", "pkg/mod.py")
+    git(repo, "commit", "-q", "-m", "chore: drop pkg", ts=T0 + 21 * DAY)
+
+    assert main([str(repo), "--json", "-n", "3", "--include-risen"]) == 0
+    from_root = json.loads(capsys.readouterr().out)
+    assert main([str(sub), "--json", "-n", "3", "--include-risen"]) == 0
+    from_sub = json.loads(capsys.readouterr().out)
+    assert from_sub == from_root
+    assert from_root[0]["path"] == "pkg/mod.py" and from_root[0]["lines"] == 2
+
+
+def test_sort_by_lines_forces_a_full_count(repo: Path, capsys, git_spy):
+    assert main([str(repo), "--json", "--limit", "1", "--sort", "lines"]) == 0
+    assert git_spy["count_lines"] == [True]
+    assert git_spy["diff_tree_paths"] == []
+    assert json.loads(capsys.readouterr().out)[0]["path"] == "legacy.py"
+
+
+def test_huge_limit_prefers_one_numstat_pass(repo: Path, capsys, git_spy):
+    from git_epitaph.cli import LAZY_LIMIT
+
+    assert main([str(repo), "--json", "--limit", str(LAZY_LIMIT + 1)]) == 0
+    assert git_spy["count_lines"] == [True]
+    assert git_spy["diff_tree_paths"] == []
+
+
+def test_limit_header_drops_lines_lost_because_they_were_not_counted(repo: Path, capsys):
+    assert main([str(repo), "--style", "list", "--include-risen"]) == 0
+    assert capsys.readouterr().out.splitlines()[0] == "3 buried, 1 risen, 23 lines lost"
+    assert main([str(repo), "--style", "list", "--include-risen", "-n", "1"]) == 0
+    assert capsys.readouterr().out.splitlines()[0] == "3 buried, 1 risen (showing 1)"
+
+
+def test_lazy_count_takes_paths_literally(repo: Path, capsys):
+    # `:` is pathspec magic (matches nothing) and `[slug]` is a one-character glob that
+    # does not match the literal file named `[slug].tsx`; both must be plain bytes
+    for name in (":colon.txt", "[slug].tsx"):
+        (repo / name).write_text("one\ntwo\n")
+    git(repo, "--literal-pathspecs", "add", "--", ":colon.txt", "[slug].tsx")
+    git(repo, "commit", "-q", "-m", "feat: odd names", ts=T0 + 20 * DAY)
+    git(repo, "--literal-pathspecs", "rm", "-q", "--", ":colon.txt", "[slug].tsx")
+    git(repo, "commit", "-q", "-m", "chore: drop odd names", ts=T0 + 21 * DAY)
+    assert main([str(repo), "--json", "-n", "2"]) == 0
+    data = {g["path"]: g for g in json.loads(capsys.readouterr().out)}
+    assert set(data) == {":colon.txt", "[slug].tsx"}
+    assert all(g["lines"] == 2 and g["lines_counted"] for g in data.values())
+
+
+def test_lazy_count_miss_is_an_error_not_a_shrug(repo: Path, capsys, monkeypatch):
     import git_epitaph.cli as cli
 
-    seen: list[bool] = []
-    real = cli.read_log
-
-    def spy(repo_, all_refs=False, count_lines=True):
-        seen.append(count_lines)
-        return real(repo_, all_refs=all_refs, count_lines=count_lines)
-
-    monkeypatch.setattr(cli, "read_log", spy)
-    assert main([str(repo), "--json", "--limit", "1", "--sort", "lines"]) == 0
-    assert seen == [True]
-    assert json.loads(capsys.readouterr().out)[0]["path"] == "legacy.py"
+    monkeypatch.setattr(cli, "deleted_lines_in", lambda repo_, sha, paths: {})
+    assert main([str(repo), "--json", "-n", "1"]) == 2
+    err = capsys.readouterr().err
+    assert "could not count lines" in err and "img.png" in err
 
 
 def test_no_lines_skips_counting_and_says_so(repo: Path, capsys):
@@ -216,37 +285,40 @@ def test_branch_deletion_is_attributed_to_the_merge_that_landed_it(repo: Path, c
     assert g["lines"] == 1
 
 
-def test_same_path_added_on_two_branches_cannot_cross(repo: Path, capsys):
-    # the interleaving that produced negative ages on hermes-agent: a path added on a
-    # side branch with a later clock than the mainline deletion of an unrelated file of
-    # the same name. first-parent makes the walk linear, so age is always >= 0.
-    git(repo, "checkout", "-q", "-b", "side")
-    (repo / "dup.txt").write_text("side\n")
-    git(repo, "add", "dup.txt")
-    git(repo, "commit", "-q", "-m", "feat: side dup", ts=T0 + 90 * DAY)
+def test_branch_and_mainline_deleting_the_same_file_do_not_cross(repo: Path, capsys):
+    # the shape behind hermes-agent's bad graves: a PR deletes keep.py on its branch, main
+    # lands the same deletion itself and then reverts it, the PR merges main into itself
+    # and is merged. walking every commit, the PR's D pops the birth first, main's own D
+    # gets an unknown birth, and the revert marks keep.py risen even though the final
+    # merge kills it. on the mainline it is two clean graves.
+    git(repo, "checkout", "-q", "-b", "pr")
+    git(repo, "rm", "-q", "keep.py")
+    git(repo, "commit", "-q", "-m", "feat: remove keep", ts=T0 + 20 * DAY)
     git(repo, "checkout", "-q", "main")
-    (repo / "dup.txt").write_text("main\n")
-    git(repo, "add", "dup.txt")
-    git(repo, "commit", "-q", "-m", "feat: main dup", ts=T0 + 60 * DAY)
-    git(repo, "rm", "-q", "dup.txt")
-    git(repo, "commit", "-q", "-m", "chore: rm main dup", ts=T0 + 61 * DAY)
-    subprocess.run(
-        ["git", "merge", "--no-ff", "-m", "merge side", "side"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-        env={
-            **os.environ,
-            "GIT_COMMITTER_DATE": f"{T0 + 62 * DAY} +0000",
-            "GIT_AUTHOR_DATE": f"{T0 + 62 * DAY} +0000",
-        },
+    git(repo, "rm", "-q", "keep.py")
+    git(repo, "commit", "-q", "-m", "feat: remove keep (#1)", ts=T0 + 21 * DAY)
+    git(repo, "revert", "--no-edit", "HEAD", ts=T0 + 22 * DAY)
+    git(repo, "checkout", "-q", "pr")
+    git(
+        repo,
+        "merge",
+        "-q",
+        "--no-ff",
+        "-m",
+        "Merge branch 'main' into pr",
+        "main",
+        ts=T0 + 23 * DAY,
     )
-    assert main([str(repo), "--json", "--include-risen", "--path", "dup.txt"]) == 0
-    graves = json.loads(capsys.readouterr().out)
-    assert all(g["age_days"] is not None and g["age_days"] >= 0 for g in graves)
-    (g,) = graves
-    assert g["age_days"] == 1
-    assert g["risen"] is True  # the side branch's dup.txt arrived via the merge
+    git(repo, "checkout", "-q", "main")
+    git(repo, "merge", "-q", "--no-ff", "-m", "Merge PR #2", "pr", ts=T0 + 24 * DAY)
+    assert not (repo / "keep.py").exists()
+
+    assert main([str(repo), "--json", "--include-risen", "--path", "keep.py"]) == 0
+    graves = sorted(json.loads(capsys.readouterr().out), key=lambda g: g["died"])
+    assert [g["born"] is not None for g in graves] == [True, True]
+    assert [g["age_days"] for g in graves] == [21, 2]
+    assert [g["risen"] for g in graves] == [True, False]
+    assert graves[1]["epitaph"] == "Merge PR #2"
 
 
 def test_auto_style_picks_stones_on_a_tty_and_list_otherwise(repo: Path, capsys, monkeypatch):
