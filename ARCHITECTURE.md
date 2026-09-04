@@ -154,6 +154,8 @@ git only, via subprocess. requires `git` on PATH and a repo with history.
 | 4.5 min on openclaw (87k commits) | `--numstat` reads every deleted blob | lazy counting when `--limit` is set (77s), `--no-lines` to skip |
 | README claimed copies (`C`) start a fresh birth | log runs with `-M` only; `C` needs `-C` | README corrected; code path kept as a no-op guard |
 | zsh loop `for f in "--raw -M"; git $f` gave 0.00s timings | zsh doesn't word-split unquoted `$f`, git got one bogus arg and exited | `${=f}` |
+| `git epitaph repo/subdir -n 1` exited 2, "could not count lines" | `git -C subdir` makes diff-tree pathspecs and `ls-tree` cwd-relative | `cli._repo_root` resolves `--show-toplevel` (or `--absolute-git-dir` for bare) before any other git call |
+| tests green on macos, two merge fixtures fail on ubuntu CI | the conflicting merge ran via raw `subprocess.run` without the identity env; git checks committer identity before merging; ubuntu runners have no global identity, macos runners do | every git call in tests goes through `_git_env`. reproduce locally with `GIT_CONFIG_GLOBAL=/dev/null` |
 | header always said "0 risen" | summary ran on the already-filtered list | summary over `all_graves`, "(showing N)" for the filtered view |
 | `Revert "..."` landed in "unknown causes" | only `revert:` (conventional) was matched | `_GIT_REVERT` regex for git's native subject shape |
 | missing `git` binary gave a traceback | only `GitError` was caught | `run_git` turns `FileNotFoundError` into `GitError("git not found on PATH")` |
@@ -163,7 +165,7 @@ git only, via subprocess. requires `git` on PATH and a repo with history.
 
 ```
 uv sync                                   # create .venv with dev deps
-uv run pytest                             # 82 tests
+uv run pytest                             # 89 tests
 uv run ruff check . && uv run ruff format --check .
 uv run git-epitaph <repo> -n 5            # try it
 uv build                                  # sdist + wheel
