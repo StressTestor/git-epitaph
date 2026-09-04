@@ -13,7 +13,9 @@ from pathlib import Path
 RS = "\x1e"  # record separator between commits
 US = "\x1f"  # unit separator between header fields
 
-FORMAT = f"{RS}%H{US}%at{US}%an{US}%s"
+# %ct (committer time) follows the DAG for rebases and cherry-picks; author time does not,
+# and a replay keyed on author time produces negative ages.
+FORMAT = f"{RS}%H{US}%ct{US}%an{US}%s"
 
 
 class GitError(RuntimeError):
@@ -100,14 +102,27 @@ def parse_log(text: str) -> list[Commit]:
     return commits
 
 
-def read_log(repo: Path, all_refs: bool = False) -> list[Commit]:
-    """Oldest-first commit list for `repo`, HEAD only unless `all_refs`."""
-    cmd = [
-        "git",
-        "-C",
-        str(repo),
+def run_git(repo: Path, *args: str) -> tuple[str, str]:
+    """Run git in `repo`; return (stdout, stderr). Raises GitError on failure or no git."""
+    cmd = ["git", "-C", str(repo), *args]
+    try:
+        # git emits UTF-8 regardless of locale; the locale codec is wrong under latin-1.
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="surrogateescape"
+        )
+    except FileNotFoundError as exc:
+        raise GitError("git not found on PATH") from exc
+    if proc.returncode != 0:
+        raise GitError(proc.stderr.strip() or f"git exited {proc.returncode}")
+    return proc.stdout, proc.stderr
+
+
+def read_log(repo: Path, all_refs: bool = False) -> tuple[list[Commit], str]:
+    """Oldest-first commit list for `repo` plus git's warnings (e.g. rename limit hit)."""
+    args = [
         "log",
         "--reverse",
+        "--topo-order",  # parents before children even when clocks disagree
         "--raw",
         "--numstat",
         "-M",
@@ -115,11 +130,20 @@ def read_log(repo: Path, all_refs: bool = False) -> list[Commit]:
         f"--format={FORMAT}",
     ]
     if all_refs:
-        cmd.append("--all")
-    # git emits UTF-8 regardless of locale; decoding with the locale codec breaks under LANG=C.
-    proc = subprocess.run(
-        cmd, capture_output=True, text=True, encoding="utf-8", errors="surrogateescape"
-    )
-    if proc.returncode != 0:
-        raise GitError(proc.stderr.strip() or f"git exited {proc.returncode}")
-    return parse_log(proc.stdout)
+        args.append("--all")
+    out, err = run_git(repo, *args)
+    return parse_log(out), err.strip()
+
+
+def living_paths(repo: Path, all_refs: bool = False) -> set[str]:
+    """Paths that exist at the tip of the walked history (HEAD, or every ref with --all)."""
+    if all_refs:
+        out, _ = run_git(repo, "for-each-ref", "--format=%(objectname)")
+        refs = out.split()
+    else:
+        refs = ["HEAD"]
+    paths: set[str] = set()
+    for ref in refs:
+        out, _ = run_git(repo, "ls-tree", "-r", "-z", "--name-only", ref)
+        paths.update(p for p in out.split("\0") if p)
+    return paths

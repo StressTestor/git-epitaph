@@ -41,6 +41,12 @@ def test_plain_removal_keywords(subject):
     assert cause_of_death(subject) == "deliberately removed"
 
 
+def test_git_native_revert_subject():
+    assert cause_of_death('Revert "feat: add the thing"') == "reverted, never happened"
+    # only git's exact shape; a sentence starting with the word is not a revert
+    assert cause_of_death("Revert to the old approach") == "unknown causes"
+
+
 def test_wip_and_unknown():
     assert cause_of_death("wip") == "died of wip"
     assert cause_of_death("WIP: half done") == "died of wip"

@@ -111,6 +111,73 @@ def test_sort_by_lines(repo: Path, capsys):
     assert data[0]["path"] == "legacy.py"
 
 
+def test_header_counts_risen_even_though_they_are_hidden(repo: Path, capsys):
+    assert main([str(repo), "--style", "list"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("3 buried, 1 risen")
+    assert "(showing 2)" in out
+
+
+def test_file_deleted_on_branch_but_kept_by_merge_is_not_dead(repo: Path, capsys):
+    # plain git log shows no diff for the merge, so only the HEAD tree reveals survival
+    git(repo, "checkout", "-q", "-b", "purge")
+    git(repo, "rm", "-q", "keep.py")
+    git(repo, "commit", "-q", "-m", "chore: drop keep.py on a branch", ts=T0 + 30 * DAY)
+    git(repo, "checkout", "-q", "main")
+    (repo / "keep.py").write_text("print('still here')\n")
+    git(repo, "add", "keep.py")
+    git(repo, "commit", "-q", "-m", "fix: touch keep.py", ts=T0 + 31 * DAY)
+    # conflict: modify/delete. resolve by keeping the file.
+    subprocess.run(["git", "merge", "purge"], cwd=repo, capture_output=True)
+    git(repo, "add", "keep.py")
+    git(repo, "-c", "core.editor=true", "commit", "-q", "--no-edit", ts=T0 + 32 * DAY)
+    assert (repo / "keep.py").exists()
+
+    assert main([str(repo), "--json"]) == 0
+    dead = [g["path"] for g in json.loads(capsys.readouterr().out)]
+    assert "keep.py" not in dead
+
+    assert main([str(repo), "--json", "--include-risen"]) == 0
+    keep = [g for g in json.loads(capsys.readouterr().out) if g["path"] == "keep.py"]
+    assert len(keep) == 1 and keep[0]["risen"] is True
+
+
+def test_auto_style_picks_stones_on_a_tty_and_list_otherwise(repo: Path, capsys, monkeypatch):
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    assert main([str(repo), "--width", "60"]) == 0
+    assert "R.I.P." in capsys.readouterr().out
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
+    assert main([str(repo)]) == 0
+    out = capsys.readouterr().out
+    assert "R.I.P." not in out
+    assert "git checkout" in out
+
+
+def test_git_warnings_are_surfaced_on_stderr(repo: Path, capsys, monkeypatch):
+    import git_epitaph.cli as cli
+
+    real = cli.read_log
+
+    def noisy(*a, **k):
+        commits, _ = real(*a, **k)
+        return commits, "warning: inexact rename detection was skipped due to too many files."
+
+    monkeypatch.setattr(cli, "read_log", noisy)
+    assert main([str(repo), "--json"]) == 0
+    assert "inexact rename detection" in capsys.readouterr().err
+
+
+def test_missing_git_binary_exits_2(repo: Path, capsys, monkeypatch):
+    import git_epitaph.gitlog as gitlog
+
+    def no_git(*a, **k):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(gitlog.subprocess, "run", no_git)
+    assert main([str(repo)]) == 2
+    assert "git not found on PATH" in capsys.readouterr().err
+
+
 def test_bad_since_rejected_before_walking(repo: Path, capsys, monkeypatch):
     def boom(*a, **k):
         raise AssertionError("log walked despite bad --since")

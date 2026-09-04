@@ -12,8 +12,8 @@ DAY = 86400
 @dataclass
 class Birth:
     path: str
-    ts: int
-    sha: str
+    ts: int | None  # None when the file predates available history
+    sha: str | None
     aliases: list[str] = field(default_factory=list)
 
 
@@ -28,7 +28,7 @@ class Grave:
     killer: str  # author of the deleting commit
     epitaph: str  # subject of the deleting commit
     lines: int | None  # lines at death; None for binaries
-    risen: bool = False  # re-added under the same path later in history
+    risen: bool = False  # exists again later in history, or still exists at HEAD
     aliases: list[str] = field(default_factory=list)
 
     @property
@@ -38,26 +38,35 @@ class Grave:
         return (self.died - self.born) // DAY
 
 
-def bury(commits: list[Commit]) -> list[Grave]:
-    """Return every death in `commits` (oldest-first), in death order."""
+def bury(commits: list[Commit], living: set[str] | None = None) -> list[Grave]:
+    """Return every death in `commits` (oldest-first), in death order.
+
+    `living` is the set of paths present at the tip of the walked history. A grave whose
+    path is in it is marked risen, which catches deaths that a merge resolution undid
+    (plain `git log` shows no diff for merge commits, so the replay cannot see those).
+    """
     alive: dict[str, Birth] = {}
     graves: list[Grave] = []
     last_grave_for: dict[str, Grave] = {}
 
+    def resurrect(path: str) -> None:
+        grave = last_grave_for.pop(path, None)
+        if grave is not None:
+            grave.risen = True
+
     for c in commits:
         for ch in c.changes:
-            if ch.status == "A":
-                if ch.path in last_grave_for:
-                    last_grave_for.pop(ch.path).risen = True
-                alive[ch.path] = Birth(ch.path, c.ts, c.sha)
-            elif ch.status == "C":
+            if ch.status in ("A", "C"):
+                resurrect(ch.path)
                 alive[ch.path] = Birth(ch.path, c.ts, c.sha)
             elif ch.status == "R":
                 if ch.old_path is None:
                     raise ValueError(f"rename without old path in {c.sha}: {ch.path}")
+                resurrect(ch.path)
                 birth = alive.pop(ch.old_path, None)
                 if birth is None:
-                    birth = Birth(ch.old_path, c.ts, c.sha)
+                    # renamed before we ever saw it born: keep admitting ignorance
+                    birth = Birth(ch.old_path, None, None)
                 birth.aliases.append(ch.old_path)
                 alive[ch.path] = birth
             elif ch.status == "D":
@@ -76,4 +85,9 @@ def bury(commits: list[Commit]) -> list[Grave]:
                 )
                 graves.append(grave)
                 last_grave_for[ch.path] = grave
+
+    if living:
+        for path, grave in last_grave_for.items():
+            if path in living:
+                grave.risen = True
     return graves

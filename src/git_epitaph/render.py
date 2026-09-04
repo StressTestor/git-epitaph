@@ -4,20 +4,42 @@ from __future__ import annotations
 
 import json
 import textwrap
+import unicodedata
 from datetime import datetime, timezone
 
 from git_epitaph.cause import cause_of_death
 from git_epitaph.walk import Grave
 
-INNER = 21  # characters of text per stone line
+INNER = 21  # display cells of text per stone line
 STONE_W = INNER + 8  # full rendered width of one stone column
+STONE_ROWS = 13
 GAP = 2
 UNKNOWN_DATE = "????-??-??"
 
 
 def clean(text: str) -> str:
-    """Escape control characters so a hostile commit subject cannot drive the terminal."""
+    """Escape control characters so a hostile commit subject cannot drive the terminal.
+
+    Lone surrogates (bytes git handed us that were not UTF-8) are not printable either,
+    so they come out as `\\udcXX` instead of crashing `print`.
+    """
     return "".join(ch if ch.isprintable() or ch == " " else repr(ch)[1:-1] for ch in text)
+
+
+def cell_width(text: str) -> int:
+    """Terminal cells a string occupies: wide/fullwidth glyphs take two, combining take zero."""
+    width = 0
+    for ch in text:
+        if unicodedata.combining(ch):
+            continue
+        width += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return width
+
+
+def center(text: str, width: int) -> str:
+    pad = max(0, width - cell_width(text))
+    left = pad // 2
+    return " " * left + text + " " * (pad - left)
 
 
 def iso(ts: int | None) -> str:
@@ -27,10 +49,15 @@ def iso(ts: int | None) -> str:
 
 
 def fit_path(path: str, width: int) -> str:
-    """Keep the tail of a path, which is the part people recognise."""
-    if len(path) <= width:
+    """Keep the tail of a path, which is the part people recognise, within `width` cells."""
+    if cell_width(path) <= width:
         return path
-    return "…" + path[-(width - 1) :]
+    tail = ""
+    for ch in reversed(path):
+        if cell_width(tail + ch) > width - 1:
+            break
+        tail = ch + tail
+    return "…" + tail
 
 
 def _lines_label(lines: int | None) -> str:
@@ -41,7 +68,7 @@ def _lines_label(lines: int | None) -> str:
 
 def _stone(g: Grave) -> list[str]:
     def body(text: str = "") -> str:
-        return "  | " + text.center(INNER) + " |  "
+        return "  | " + center(text, INNER) + " |  "
 
     rows = [
         "   ." + "-" * INNER + ".   ",
@@ -57,7 +84,7 @@ def _stone(g: Grave) -> list[str]:
     ]
     cause = textwrap.wrap(cause_of_death(g.epitaph), INNER)[:2] or [""]
     rows.extend(body(line) for line in cause)
-    while len(rows) < 12:
+    while len(rows) < STONE_ROWS - 1:
         rows.append(body())
     rows.append(" _|" + "_" * (INNER + 2) + "|_ ")
     return rows
@@ -70,10 +97,7 @@ def render_stones(graves: list[Grave], width: int = 80) -> str:
     out: list[str] = []
     for start in range(0, len(graves), cols):
         row = [_stone(g) for g in graves[start : start + cols]]
-        height = max(len(s) for s in row)
-        for s in row:
-            s.extend([" " * STONE_W] * (height - len(s)))
-        for i in range(height):
+        for i in range(STONE_ROWS):
             out.append((" " * GAP).join(s[i] for s in row))
         out.append("")
     return "\n".join(out).rstrip("\n")
@@ -110,19 +134,24 @@ def render_list(graves: list[Grave]) -> str:
     return "\n\n".join(blocks)
 
 
+def _json_safe(text: str) -> str:
+    """Lone surrogates from non-UTF-8 filenames become the original byte as `\\xNN`."""
+    return text.encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")
+
+
 def _as_dict(g: Grave) -> dict:
     return {
-        "path": g.path,
-        "born_path": g.born_path,
-        "aliases": g.aliases,
+        "path": _json_safe(g.path),
+        "born_path": _json_safe(g.born_path),
+        "aliases": [_json_safe(a) for a in g.aliases],
         "born": g.born,
         "born_iso": None if g.born is None else iso(g.born),
         "born_sha": g.born_sha,
         "died": g.died,
         "died_iso": iso(g.died),
         "died_sha": g.died_sha,
-        "killer": g.killer,
-        "epitaph": g.epitaph,
+        "killer": _json_safe(g.killer),
+        "epitaph": _json_safe(g.epitaph),
         "cause": cause_of_death(g.epitaph),
         "lines": g.lines,
         "age_days": g.age_days,

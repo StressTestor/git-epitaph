@@ -52,17 +52,24 @@ git log ──▶ gitlog.parse_log ──▶ list[Commit] ──▶ walk.bury �
                                               render.{render_stones,render_list,to_json}
 ```
 
-- **one git call.** `--raw` gives per-path status (A/M/D/R/C), `--numstat` gives lines
-  removed. combining them in one invocation is what keeps the tool O(history) instead of
-  O(files) subprocesses. `--name-status --numstat` does NOT combine (git prints only one),
-  which is why `--raw` is used.
+- **two git calls.** `git log --raw --numstat -M --reverse --topo-order` gives per-path
+  status (A/M/D/R/C) and lines removed in one pass, then `git ls-tree -r HEAD` gives the
+  set of living paths. that keeps the tool O(history) instead of O(files) subprocesses.
+  `--name-status --numstat` does NOT combine (git prints only one), which is why `--raw`
+  is used. `--topo-order` guarantees parents before children under clock skew.
+- **living set closes the merge gap.** plain `git log` emits no diff for merge commits,
+  so a side-branch `D` that a conflict resolution kept looks like a death. `bury()` takes
+  the HEAD tree and flips those graves to `risen`.
+- **committer time, not author time.** `%ct` follows the DAG through rebases and
+  cherry-picks; `%at` does not and yields negative ages.
 - **custom record separators.** log format is `\x1e%H\x1f%at\x1f%an\x1f%s`. `\x1e` starts
   a commit, `\x1f` splits header fields, so subjects with newlines, tabs or colons never
   break parsing.
 - **oldest-first replay.** `--reverse` lets `walk.bury` keep a dict of living files. `A`
-  starts a `Birth`, `R` moves the birth to the new path and records the alias, `C` starts
-  a fresh birth for the copy, `D` pops the birth and emits a `Grave`. an `A` at a path that
-  already has a grave flips that grave's `risen` flag.
+  starts a `Birth`, `R` moves the birth to the new path and records the alias (a rename of
+  a never-seen file keeps `born=None` rather than inventing a date), `C` starts a fresh
+  birth for the copy, `D` pops the birth and emits a `Grave`. any `A`, `R` or `C` landing
+  on a path that already has a grave flips that grave's `risen` flag.
 - **cause is derived, never stored.** `cause.cause_of_death(subject)` is called at render
   time. tests pin the table.
 - **fail loudly.** any git failure raises `GitError` with git's stderr; the CLI prints it
@@ -71,8 +78,15 @@ git log ──▶ gitlog.parse_log ──▶ list[Commit] ──▶ walk.bury �
   reverses it, including octal UTF-8 escapes. output for shell use is single-quoted with
   `'\''` escaping, never `shlex.quote`, so paths are always visibly quoted.
 - **repo content is untrusted.** everything that came from git (path, author, subject)
-  passes through `render.clean()` before printing. non-printable characters become their
-  `\xNN` / `\n` escapes. JSON output is left raw because `json.dumps` already escapes.
+  passes through `render.clean()` before printing. non-printable characters, including
+  the lone surrogates a non-UTF-8 filename decodes to, become escapes instead of crashing
+  `print`. JSON strings go through `_json_safe()` so surrogates become the original byte
+  as `\xNN`.
+- **display cells, not code points.** stone text is centred with `render.cell_width()`
+  (east asian wide/fullwidth = 2, combining = 0) so CJK paths keep the rectangle.
+- **git warnings are not swallowed.** stderr from a successful `git log` (e.g. "inexact
+  rename detection was skipped") is echoed to stderr, since it means renames in that
+  commit were reported as death plus birth.
 - **validate before work.** `--since` and `--limit` are argparse `type=` converters, so a
   bad value exits 2 before the (possibly slow) log walk starts.
 
@@ -109,12 +123,17 @@ git only, via subprocess. requires `git` on PATH and a repo with history.
 | bad `--since` only errored after the full log walk | validation lived in `select()` | `--since` and `--limit` are argparse `type=` callbacks, so argparse exits 2 before git runs |
 | "every file is still alive" printed when filters matched nothing | one empty-check for two situations | separate message when `all_graves` is non-empty |
 | bare repo reported as "not a git repository" | only `--is-inside-work-tree` was checked | also accept `--is-bare-repository` |
+| file deleted on a branch, kept by merge resolution, reported dead | `git log` shows no diff for merges | compare graves against `ls-tree -r HEAD`, mark survivors risen |
+| header always said "0 risen" | summary ran on the already-filtered list | summary over `all_graves`, "(showing N)" for the filtered view |
+| `Revert "..."` landed in "unknown causes" | only `revert:` (conventional) was matched | `_GIT_REVERT` regex for git's native subject shape |
+| missing `git` binary gave a traceback | only `GitError` was caught | `run_git` turns `FileNotFoundError` into `GitError("git not found on PATH")` |
+| `\udcff` in JSON instead of the real byte | `backslashreplace` straight from the surrogate | encode `surrogateescape` first, then decode `backslashreplace` |
 
 ## commands
 
 ```
 uv sync                                   # create .venv with dev deps
-uv run pytest                             # 59 tests
+uv run pytest                             # 73 tests
 uv run ruff check . && uv run ruff format --check .
 uv run git-epitaph <repo> -n 5            # try it
 uv build                                  # sdist + wheel

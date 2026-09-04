@@ -5,13 +5,12 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import shutil
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 from git_epitaph import __version__
-from git_epitaph.gitlog import GitError, read_log
+from git_epitaph.gitlog import GitError, living_paths, read_log, run_git
 from git_epitaph.render import render_list, render_stones, summary, to_json
 from git_epitaph.walk import Grave, bury
 
@@ -83,15 +82,13 @@ def _non_negative(value: str) -> int:
 
 def _assert_repo(repo: Path) -> None:
     """Accept work trees and bare repos; reject everything else before doing any work."""
-    proc = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "--is-inside-work-tree", "--is-bare-repository"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    flags = proc.stdout.split()
-    if proc.returncode != 0 or "true" not in flags:
+    try:
+        out, _ = run_git(repo, "rev-parse", "--is-inside-work-tree", "--is-bare-repository")
+    except GitError as exc:
+        if "not found on PATH" in str(exc):
+            raise
+        raise GitError(f"not a git repository: {repo}") from exc
+    if "true" not in out.split():
         raise GitError(f"not a git repository: {repo}")
 
 
@@ -119,12 +116,17 @@ def main(argv: list[str] | None = None) -> int:
     repo = Path(args.repo)
     try:
         _assert_repo(repo)
-        commits = read_log(repo, all_refs=args.all)
+        commits, warnings = read_log(repo, all_refs=args.all)
+        living = living_paths(repo, all_refs=args.all)
     except GitError as exc:
         print(f"git-epitaph: {exc}", file=sys.stderr)
         return 2
+    if warnings:
+        # e.g. "inexact rename detection was skipped": renames in that commit will show
+        # as a death plus a birth, and the user deserves to know why.
+        print(f"git-epitaph: git says: {warnings}", file=sys.stderr)
 
-    all_graves = bury(commits)
+    all_graves = bury(commits, living=living)
     graves = select(all_graves, args)
     shown = graves[: args.limit] if args.limit is not None else graves
 
@@ -144,8 +146,10 @@ def main(argv: list[str] | None = None) -> int:
         style = "stones" if sys.stdout.isatty() else "list"
     width = args.width or shutil.get_terminal_size((80, 24)).columns
 
-    header = summary(graves)
-    if len(shown) != len(graves):
+    # totals over everything, so "risen" is a real number even though risen graves are
+    # hidden by default
+    header = summary(all_graves)
+    if len(shown) != len(all_graves):
         header += f" (showing {len(shown)})"
     print(header)
     print()

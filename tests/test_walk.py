@@ -96,6 +96,44 @@ def test_binary_delete_has_no_line_count():
     assert g.lines is None
 
 
+def test_rename_of_unknown_file_keeps_birth_unknown():
+    # shallow history: we never saw old.py born, so the rename must not invent a birth
+    commits = [
+        commit("r1", DAY, "move", [Change("R", "new.py", old_path="old.py")]),
+        commit("d1", 5 * DAY, "rm", [Change("D", "new.py")], {"new.py": 3}),
+    ]
+    (g,) = bury(commits)
+    assert g.born is None
+    assert g.born_sha is None
+    assert g.age_days is None
+    assert g.aliases == ["old.py"]
+
+
+def test_rename_or_copy_onto_a_buried_path_marks_it_risen():
+    commits = [
+        commit("a1", 0, "add", [Change("A", "x"), Change("A", "y"), Change("A", "z")]),
+        commit("d1", DAY, "rm x", [Change("D", "x")], {"x": 1}),
+        commit("r1", 2 * DAY, "y -> x", [Change("R", "x", old_path="y")]),
+        commit("d2", 3 * DAY, "rm x again", [Change("D", "x")], {"x": 1}),
+        commit("c1", 4 * DAY, "copy z -> x", [Change("C", "x", old_path="z")]),
+    ]
+    graves = bury(commits)
+    assert [g.risen for g in graves] == [True, True]
+
+
+def test_living_paths_mark_graves_risen_when_replay_missed_the_return():
+    # a merge resolution kept the file; plain git log shows no diff for the merge, so the
+    # only evidence the file is alive is that it exists at HEAD
+    commits = [
+        commit("a1", 0, "add", [Change("A", "kept.py"), Change("A", "gone.py")]),
+        commit("d1", DAY, "rm both", [Change("D", "kept.py"), Change("D", "gone.py")]),
+    ]
+    graves = bury(commits, living={"kept.py", "unrelated.py"})
+    by_path = {g.path: g for g in graves}
+    assert by_path["kept.py"].risen is True
+    assert by_path["gone.py"].risen is False
+
+
 def test_graves_are_ordered_by_death_time():
     commits = [
         commit("a1", 0, "add", [Change("A", "a"), Change("A", "b")]),

@@ -1,6 +1,14 @@
 import json
 
-from git_epitaph.render import fit_path, render_list, render_stones, summary, to_json
+from git_epitaph.render import (
+    STONE_W,
+    cell_width,
+    fit_path,
+    render_list,
+    render_stones,
+    summary,
+    to_json,
+)
 from git_epitaph.walk import Grave
 
 DAY = 86400
@@ -113,6 +121,34 @@ def test_control_characters_are_escaped_in_every_text_output():
     # stone stays rectangular even with the escaped path
     widths = {len(line) for line in stones.splitlines() if line.strip()}
     assert len(widths) == 1
+
+
+def test_wide_glyphs_keep_the_stone_rectangular():
+    out = render_stones([grave(path="src/日本語のファイル.py")], width=40)
+    widths = {cell_width(line) for line in out.splitlines() if line.strip()}
+    assert widths == {STONE_W}
+
+
+def test_fit_path_counts_cells_not_code_points():
+    out = fit_path("日本語日本語日本語日本語.py", 12)
+    assert cell_width(out) <= 12
+    assert out.startswith("…")
+    assert out.endswith(".py")
+
+
+def test_json_survives_non_utf8_filename():
+    bad = grave(path="bad\udcff.py", killer="k\udcfe", epitaph="e\udcfd")
+    text = to_json([bad])
+    text.encode("utf-8")  # would raise on a lone surrogate
+    data = json.loads(text)
+    assert data[0]["path"] == "bad\\xff.py"
+
+
+def test_text_output_survives_non_utf8_filename():
+    bad = grave(path="bad\udcff.py")
+    for out in (render_stones([bad], width=40), render_list([bad])):
+        out.encode("utf-8")
+        assert "\\udcff" in out
 
 
 def test_summary_counts():

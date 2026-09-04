@@ -27,6 +27,8 @@ _REMOVAL_WORDS = re.compile(
     re.IGNORECASE,
 )
 _WIP = re.compile(r"^\s*wip\b", re.IGNORECASE)
+# git's own `git revert` writes `Revert "<subject>"`, no colon
+_GIT_REVERT = re.compile(r'^\s*Revert\s+"')
 
 
 def cause_of_death(subject: str) -> str:
@@ -35,6 +37,8 @@ def cause_of_death(subject: str) -> str:
         cause = _BY_TYPE.get(m.group(1).lower())
         if cause:
             return cause
+    if _GIT_REVERT.match(subject):
+        return _BY_TYPE["revert"]
     if _WIP.match(subject):
         return "died of wip"
     if _REMOVAL_WORDS.search(subject):

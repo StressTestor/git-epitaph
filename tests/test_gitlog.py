@@ -1,3 +1,5 @@
+import pytest
+
 from git_epitaph.gitlog import Change, parse_log, unquote
 
 RS = "\x1e"
@@ -42,9 +44,10 @@ def test_parse_rename_and_add_and_modify():
         Change("A", "new.py"),
         Change("M", "README.md"),
     ]
-    # renames and adds never populate deleted_lines; only D rows matter downstream
-    assert "new.py" in c.deleted_lines
+    # every numstat row is recorded; the walker only ever looks up paths from D rows
+    assert c.deleted_lines["new.py"] == 0
     assert c.deleted_lines["README.md"] == 1
+    assert c.deleted_lines["src/{a.py => b.py}"] == 0
 
 
 def test_parse_binary_numstat_is_none():
@@ -74,6 +77,19 @@ def test_parse_subject_with_unicode_and_empty_subject():
     assert c.subject == ""
     (c2,) = parse_log(rec("f" * 40, 1, "joe", "chore(outputs): clean — housekeeping", ""))
     assert "housekeeping" in c2.subject
+
+
+def test_read_log_reports_missing_git_as_giterror(tmp_path, monkeypatch):
+    import subprocess
+
+    from git_epitaph.gitlog import GitError, read_log
+
+    def no_git(*a, **k):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(subprocess, "run", no_git)
+    with pytest.raises(GitError, match="git not found on PATH"):
+        read_log(tmp_path)
 
 
 def test_unquote_handles_octal_and_plain():

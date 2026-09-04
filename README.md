@@ -87,7 +87,13 @@ the old name to `aliases`. a copy (`C`) starts a fresh birth for the copy. a fil
 existed before the available history (shallow clone) gets `????-??-??` for its birth.
 
 merge commits are walked but their combined diff is skipped, same as plain `git log`,
-so a deletion is attributed to the commit that actually made it.
+so a deletion is attributed to the commit that actually made it. the one thing that
+hides is a deletion on a side branch that a merge conflict resolution then undid. to
+catch it, every grave is checked against the tree at HEAD (or every ref with `--all`);
+a file that is still there is marked risen, not dead.
+
+dates are committer times, which follow the commit graph through rebases and
+cherry-picks. author times don't, and produce negative ages.
 
 ## limitations
 
