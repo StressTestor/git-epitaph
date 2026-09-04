@@ -78,7 +78,7 @@ directly (`refactor:` is "refactored out of existence", `fix:` is "was the bug",
 `revert:` and git's own `Revert "..."` are "reverted, never happened"). without a type
 prefix it looks for removal words like remove, delete, drop, prune, purge, and falls back
 to "unknown causes". a subject starting with `wip` is "died of wip". the full table is in
-`cause.py`.
+`src/git_epitaph/cause.py`.
 
 ## what counts as dead
 
@@ -95,7 +95,7 @@ merge conflict resolution, which plain `git log` never shows). on the mainline b
 numbers are zero.
 
 it also means a file that lived and died inside a PR branch without ever reaching main
-isn't in the graveyard. it was never on the mainline to begin with.
+isn't in the graveyard.
 
 a rename (`R` in `git log -M`) keeps the birth record and adds the old name to `aliases`.
 copies aren't detected; a copied file is just a new file. a file that existed before the
@@ -105,9 +105,8 @@ times, so rebases and cherry-picks don't produce negative ages.
 ## speed
 
 line counts are the expensive part: git has to read every deleted blob to count them.
-so counts are only computed for everything when you ask for everything. with `-n` and a
-sort other than `lines`, the big walk skips them and the shown graves get counted
-individually afterwards.
+so with `-n` and a sort other than `lines`, the big walk skips them and only the shown
+graves get counted afterwards.
 
 | repo | commits | `-n 6` | full count |
 |---|---|---|---|
