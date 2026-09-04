@@ -60,10 +60,12 @@ def fit_path(path: str, width: int) -> str:
     return "…" + tail
 
 
-def _lines_label(lines: int | None) -> str:
-    if lines is None:
+def _lines_label(g: Grave) -> str:
+    if not g.counted:
+        return "lines not counted"
+    if g.binary or g.lines is None:
         return "binary"
-    return f"{lines} line{'s' if lines != 1 else ''}"
+    return f"{g.lines} line{'s' if g.lines != 1 else ''}"
 
 
 def _stone(g: Grave) -> list[str]:
@@ -76,7 +78,7 @@ def _stone(g: Grave) -> list[str]:
         body("R.I.P."),
         body("(RISEN)") if g.risen else body(),
         body(fit_path(clean(g.path), INNER)),
-        body(_lines_label(g.lines)),
+        body(_lines_label(g)),
         body(),
         body(iso(g.born)),
         body(iso(g.died)),
@@ -124,7 +126,7 @@ def render_list(graves: list[Grave]) -> str:
             "\n".join(
                 [
                     head,
-                    f"  {iso(g.born)} -> {iso(g.died)}  {age}  {_lines_label(g.lines)}  "
+                    f"  {iso(g.born)} -> {iso(g.died)}  {age}  {_lines_label(g)}  "
                     f"{cause_of_death(g.epitaph)}",
                     f"  killed by {clean(g.killer)} in {short}: {clean(g.epitaph)}",
                     f"  git checkout {short}^ -- {_sh_quote(clean(g.path))}",
@@ -154,6 +156,8 @@ def _as_dict(g: Grave) -> dict:
         "epitaph": _json_safe(g.epitaph),
         "cause": cause_of_death(g.epitaph),
         "lines": g.lines,
+        "binary": g.binary,
+        "lines_counted": g.counted,
         "age_days": g.age_days,
         "risen": g.risen,
     }
@@ -165,5 +169,7 @@ def to_json(graves: list[Grave]) -> str:
 
 def summary(graves: list[Grave]) -> str:
     risen = sum(1 for g in graves if g.risen)
-    lines = sum(g.lines or 0 for g in graves)
-    return f"{len(graves)} buried, {risen} risen, {lines} lines lost"
+    head = f"{len(graves)} buried, {risen} risen"
+    if graves and all(g.counted for g in graves):
+        head += f", {sum(g.lines or 0 for g in graves)} lines lost"
+    return head

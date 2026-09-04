@@ -13,8 +13,8 @@ from pathlib import Path
 RS = "\x1e"  # record separator between commits
 US = "\x1f"  # unit separator between header fields
 
-# %ct (committer time) follows the DAG for rebases and cherry-picks; author time does not,
-# and a replay keyed on author time produces negative ages.
+# %ct (committer time) is monotonic along a first-parent chain in practice; author time is
+# whatever the contributor's clock said and produces negative ages.
 FORMAT = f"{RS}%H{US}%ct{US}%an{US}%s"
 
 
@@ -117,22 +117,49 @@ def run_git(repo: Path, *args: str) -> tuple[str, str]:
     return proc.stdout, proc.stderr
 
 
-def read_log(repo: Path, all_refs: bool = False) -> tuple[list[Commit], str]:
-    """Oldest-first commit list for `repo` plus git's warnings (e.g. rename limit hit)."""
+def read_log(
+    repo: Path, all_refs: bool = False, count_lines: bool = True
+) -> tuple[list[Commit], str]:
+    """Oldest-first mainline history for `repo` plus git's warnings (e.g. rename limit hit).
+
+    `--first-parent` makes the walk a straight line, so a birth is always an ancestor of
+    its death and two branches adding the same path can never interleave. Each merge is
+    diffed against its first parent, so a PR lands as one net change at the merge commit,
+    and files created or kept inside a conflict resolution are visible.
+
+    `--numstat` is ~95% of the wall time on large repos (it reads every deleted blob), so
+    callers that only need counts for a handful of graves pass `count_lines=False` and
+    fill them in afterwards with `deleted_lines_in`.
+    """
     args = [
         "log",
         "--reverse",
-        "--topo-order",  # parents before children even when clocks disagree
+        "--first-parent",
+        "--diff-merges=first-parent",
         "--raw",
-        "--numstat",
         "-M",
         "--no-color",
         f"--format={FORMAT}",
     ]
+    if count_lines:
+        args.insert(args.index("--raw") + 1, "--numstat")
     if all_refs:
         args.append("--all")
     out, err = run_git(repo, *args)
     return parse_log(out), err.strip()
+
+
+def deleted_lines_in(repo: Path, sha: str, paths: list[str]) -> dict[str, int | None]:
+    """Lines removed from each of `paths` by commit `sha`, against its first parent."""
+    out, _ = run_git(
+        repo, "diff-tree", "-r", "--numstat", "--no-color", f"{sha}^1", sha, "--", *paths
+    )
+    result: dict[str, int | None] = {}
+    for line in out.splitlines():
+        if "\t" in line:
+            path, count = _parse_numstat_line(line)
+            result[path] = count
+    return result
 
 
 def living_paths(repo: Path, all_refs: bool = False) -> set[str]:

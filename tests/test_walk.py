@@ -94,6 +94,19 @@ def test_binary_delete_has_no_line_count():
     ]
     (g,) = bury(commits)
     assert g.lines is None
+    assert g.binary is True
+    assert g.counted is True
+
+
+def test_missing_numstat_means_not_counted_rather_than_binary():
+    commits = [
+        commit("a1", 0, "add", [Change("A", "x.py")]),
+        commit("d1", DAY, "rm", [Change("D", "x.py")]),  # no deleted_lines at all
+    ]
+    (g,) = bury(commits)
+    assert g.lines is None
+    assert g.binary is False
+    assert g.counted is False
 
 
 def test_rename_of_unknown_file_keeps_birth_unknown():

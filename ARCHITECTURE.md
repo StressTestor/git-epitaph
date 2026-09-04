@@ -15,6 +15,7 @@ renderers (ASCII stones, flat list, JSON) print the result. no state is written 
 | build | hatchling 1.27.0 (pinned) | src layout, console script entry point |
 | dev | uv, pytest 8.4.1, ruff 0.12.7 (pinned in `pyproject.toml`) | |
 | entry point | `git-epitaph` console script | lets git dispatch `git epitaph` |
+| git | 2.31+ | `--diff-merges=first-parent` |
 
 ## directory tree
 
@@ -52,24 +53,37 @@ git log ──▶ gitlog.parse_log ──▶ list[Commit] ──▶ walk.bury �
                                               render.{render_stones,render_list,to_json}
 ```
 
-- **two git calls.** `git log --raw --numstat -M --reverse --topo-order` gives per-path
-  status (A/M/D/R/C) and lines removed in one pass, then `git ls-tree -r HEAD` gives the
-  set of living paths. that keeps the tool O(history) instead of O(files) subprocesses.
-  `--name-status --numstat` does NOT combine (git prints only one), which is why `--raw`
-  is used. `--topo-order` guarantees parents before children under clock skew.
-- **living set closes the merge gap.** plain `git log` emits no diff for merge commits,
-  so a side-branch `D` that a conflict resolution kept looks like a death. `bury()` takes
-  the HEAD tree and flips those graves to `risen`.
-- **committer time, not author time.** `%ct` follows the DAG through rebases and
-  cherry-picks; `%at` does not and yields negative ages.
+- **mainline walk.** `git log --reverse --first-parent --diff-merges=first-parent --raw
+  [--numstat] -M`. first-parent makes history a straight line, so a birth is always an
+  ancestor of its death and two branches adding the same path can never interleave.
+  diffing each merge against its first parent makes a merged PR one net change at the
+  merge commit, which also exposes files created or kept inside a conflict resolution.
+  measured on hermes-agent: the every-commit walk gave 11 negative ages and 5 unknown
+  births; the mainline walk gives 0 and 0.
+- **two git calls, plus a few small ones.** the log pass gives per-path status
+  (A/M/D/R) and, when requested, lines removed; `git ls-tree -r HEAD` gives the living
+  set. `--name-status --numstat` does NOT combine (git prints only one), which is why
+  `--raw` is used.
+- **lazy line counts.** `--numstat` is ~95% of wall time on big repos (it reads every
+  deleted blob; hermes-agent 25.7s with vs 1.1s without). `cli.main` only asks the log
+  pass for counts when the answer needs all of them (no `--limit`, or `--sort lines`).
+  otherwise `cli.fill_lines` runs one `git diff-tree --numstat sha^1 sha -- paths` per
+  death commit for just the shown graves. `--no-lines` skips counting entirely.
+  `Grave.counted` / `Grave.binary` keep "not counted" distinct from "binary".
+- **living set is a consistency check.** on a first-parent walk the HEAD tree should
+  never contain a buried path; if it does, `bury()` flips that grave to `risen` rather
+  than lie.
+- **committer time, not author time.** `%ct` is monotonic along a first-parent chain in
+  practice; `%at` is whatever the contributor's clock said and yields negative ages.
 - **custom record separators.** log format is `\x1e%H\x1f%at\x1f%an\x1f%s`. `\x1e` starts
   a commit, `\x1f` splits header fields, so subjects with newlines, tabs or colons never
   break parsing.
 - **oldest-first replay.** `--reverse` lets `walk.bury` keep a dict of living files. `A`
   starts a `Birth`, `R` moves the birth to the new path and records the alias (a rename of
-  a never-seen file keeps `born=None` rather than inventing a date), `C` starts a fresh
-  birth for the copy, `D` pops the birth and emits a `Grave`. any `A`, `R` or `C` landing
-  on a path that already has a grave flips that grave's `risen` flag.
+  a never-seen file keeps `born=None` rather than inventing a date), `D` pops the birth
+  and emits a `Grave`. any `A`, `R` or `C` landing on a path that already has a grave
+  flips that grave's `risen` flag. `C` is handled for completeness but never emitted,
+  since the log runs with `-M` and not `-C`.
 - **cause is derived, never stored.** `cause.cause_of_death(subject)` is called at render
   time. tests pin the table.
 - **fail loudly.** any git failure raises `GitError` with git's stderr; the CLI prints it
@@ -123,7 +137,11 @@ git only, via subprocess. requires `git` on PATH and a repo with history.
 | bad `--since` only errored after the full log walk | validation lived in `select()` | `--since` and `--limit` are argparse `type=` callbacks, so argparse exits 2 before git runs |
 | "every file is still alive" printed when filters matched nothing | one empty-check for two situations | separate message when `all_graves` is non-empty |
 | bare repo reported as "not a git repository" | only `--is-inside-work-tree` was checked | also accept `--is-bare-repository` |
-| file deleted on a branch, kept by merge resolution, reported dead | `git log` shows no diff for merges | compare graves against `ls-tree -r HEAD`, mark survivors risen |
+| file deleted on a branch, kept by merge resolution, reported dead | `git log` shows no diff for merges | `--first-parent --diff-merges=first-parent`: the merge's net diff is what's walked, so the branch `D` never appears |
+| 11 negative ages and 5 unknown births on hermes-agent | every-commit walk interleaves branches; merge-born files have no `A` row | same fix: mainline walk. `tests/test_cli.py::test_same_path_added_on_two_branches_cannot_cross` |
+| 4.5 min on openclaw (87k commits) | `--numstat` reads every deleted blob | lazy counting when `--limit` is set (77s), `--no-lines` to skip |
+| README claimed copies (`C`) start a fresh birth | log runs with `-M` only; `C` needs `-C` | README corrected; code path kept as a no-op guard |
+| zsh loop `for f in "--raw -M"; git $f` gave 0.00s timings | zsh doesn't word-split unquoted `$f`, git got one bogus arg and exited | `${=f}` |
 | header always said "0 risen" | summary ran on the already-filtered list | summary over `all_graves`, "(showing N)" for the filtered view |
 | `Revert "..."` landed in "unknown causes" | only `revert:` (conventional) was matched | `_GIT_REVERT` regex for git's native subject shape |
 | missing `git` binary gave a traceback | only `GitError` was caught | `run_git` turns `FileNotFoundError` into `GitError("git not found on PATH")` |
@@ -133,7 +151,7 @@ git only, via subprocess. requires `git` on PATH and a repo with history.
 
 ```
 uv sync                                   # create .venv with dev deps
-uv run pytest                             # 73 tests
+uv run pytest                             # 82 tests
 uv run ruff check . && uv run ruff format --check .
 uv run git-epitaph <repo> -n 5            # try it
 uv build                                  # sdist + wheel

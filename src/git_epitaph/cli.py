@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from git_epitaph import __version__
-from git_epitaph.gitlog import GitError, living_paths, read_log, run_git
+from git_epitaph.gitlog import GitError, deleted_lines_in, living_paths, read_log, run_git
 from git_epitaph.render import render_list, render_stones, summary, to_json
 from git_epitaph.walk import Grave, bury
 
@@ -62,6 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="walk all refs as one timeline; a file deleted on one branch but alive on "
         "another is reported dead",
     )
+    p.add_argument(
+        "--no-lines",
+        action="store_true",
+        help="skip line counts entirely (they are the slow part on big repos)",
+    )
     p.add_argument("--version", action="version", version=f"git-epitaph {__version__}")
     return p
 
@@ -92,6 +97,18 @@ def _assert_repo(repo: Path) -> None:
         raise GitError(f"not a git repository: {repo}")
 
 
+def fill_lines(repo: Path, graves: list[Grave]) -> None:
+    """Count lines for just these graves, one diff-tree per death commit."""
+    by_commit: dict[str, list[Grave]] = {}
+    for g in graves:
+        by_commit.setdefault(g.died_sha, []).append(g)
+    for sha, group in by_commit.items():
+        counts = deleted_lines_in(repo, sha, [g.path for g in group])
+        for g in group:
+            if g.path in counts:
+                g.set_lines(counts[g.path])
+
+
 def select(graves: list[Grave], args: argparse.Namespace) -> list[Grave]:
     out = graves
     if not args.include_risen:
@@ -114,9 +131,12 @@ def select(graves: list[Grave], args: argparse.Namespace) -> list[Grave]:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     repo = Path(args.repo)
+    # counting lines reads every deleted blob and is ~95% of the wall time on big repos.
+    # only pay for all of it when the answer needs all of it.
+    count_all = not args.no_lines and (args.limit is None or args.sort == "lines")
     try:
         _assert_repo(repo)
-        commits, warnings = read_log(repo, all_refs=args.all)
+        commits, warnings = read_log(repo, all_refs=args.all, count_lines=count_all)
         living = living_paths(repo, all_refs=args.all)
     except GitError as exc:
         print(f"git-epitaph: {exc}", file=sys.stderr)
@@ -129,6 +149,13 @@ def main(argv: list[str] | None = None) -> int:
     all_graves = bury(commits, living=living)
     graves = select(all_graves, args)
     shown = graves[: args.limit] if args.limit is not None else graves
+
+    if not count_all and not args.no_lines:
+        try:
+            fill_lines(repo, shown)
+        except GitError as exc:
+            print(f"git-epitaph: {exc}", file=sys.stderr)
+            return 2
 
     if args.json:
         print(to_json(shown))

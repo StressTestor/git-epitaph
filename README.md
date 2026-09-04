@@ -1,38 +1,37 @@
 # git-epitaph
 
 every repo has a graveyard. `git log --diff-filter=D` will show you the bodies, one
-commit at a time, with no birth dates, no line counts, and no way to tell a file that
-was renamed from one that actually died. nobody reads it.
+commit at a time, without birth dates or line counts, and it can't tell a rename from a
+real death. nobody reads it.
 
-`git epitaph` walks the whole history once and prints a tombstone for every file that
-was ever deleted: when it was born, when it died, how many lines it had, who deleted it,
-and the commit message that did it. renames carry the birth date forward instead of
-counting as a death. files that came back later get marked as risen.
+`git epitaph` walks the mainline once and prints a tombstone for every file that was ever
+deleted: when it was born, when it died, how many lines it had, who deleted it, and the
+commit message that did it. renames carry the birth date forward instead of counting as a
+death. files that came back later get marked as risen.
 
 ```
 $ git epitaph -n 3
-123 buried, 0 risen, 80123 lines lost (showing 3)
+124 buried, 1 risen (showing 3)
 
    .---------------------.        .---------------------.        .---------------------.
   /                       \      /                       \      /                       \
-  |         R.I.P.        |      |         R.I.P.        |      |         R.I.P.        |
+  |        R.I.P.         |      |        R.I.P.         |      |        R.I.P.         |
   |                       |      |                       |      |                       |
   | …rop-99eb07/README.md |      | …joe-writing-voice.md |      | …99eb07/kaomojidex.md |
-  |        9 lines        |      |        73 lines       |      |       633 lines       |
+  |        9 lines        |      |       73 lines        |      |       633 lines       |
   |                       |      |                       |      |                       |
-  |       2026-08-24      |      |       2026-08-24      |      |       2026-08-24      |
-  |       2026-08-24      |      |       2026-08-24      |      |       2026-08-24      |
+  |      2026-08-24       |      |      2026-08-24       |      |      2026-08-24       |
+  |      2026-08-24       |      |      2026-08-24       |      |      2026-08-24       |
   |                       |      |                       |      |                       |
   |  swept up in a chore  |      |  swept up in a chore  |      |  swept up in a chore  |
   |                       |      |                       |      |                       |
  _|_______________________|_    _|_______________________|_    _|_______________________|_
 ```
 
-(that repo is [PromptPressure](https://github.com/StressTestor/PromptPressure). 146 commits,
-about 0.3s of CPU.)
+(that repo is [PromptPressure](https://github.com/StressTestor/PromptPressure), 146 commits.)
 
-stdlib only. no network, no API keys, no hooks to install, nothing written into your repo.
-it reads `git log` and that's the whole trick.
+stdlib only, and the only thing it runs is `git`. nothing gets written into your repo and
+nothing leaves your machine.
 
 ## install
 
@@ -43,7 +42,7 @@ pipx install git-epitaph
 ```
 
 that puts `git-epitaph` on your PATH, which means `git epitaph` works as a subcommand.
-python 3.10+, git 2.x.
+python 3.10+, git 2.31+.
 
 ## usage
 
@@ -54,6 +53,7 @@ git epitaph --sort age           # longest-lived files that eventually died
 git epitaph --since 2026-01-01   # deaths this year
 git epitaph --path 'src/**'      # only one subtree (matches old names too)
 git epitaph --include-risen      # show files that were deleted and later re-added
+git epitaph --no-lines           # skip line counts, the slow part on big repos
 git epitaph --all                # walk every ref, not just HEAD
 git epitaph --json | jq          # machine readable
 git epitaph --style list         # one block per grave with a resurrection command
@@ -63,7 +63,7 @@ the list style includes the exact command to bring a file back:
 
 ```
 $ git epitaph -n 1 --sort lines --style list
-123 buried, 0 risen, 80123 lines lost (showing 1)
+124 buried, 1 risen, 80455 lines lost (showing 1)
 
 desktop/build/sidecar/xref-sidecar.html
   2026-01-30 -> 2026-03-25  54 days  52869 lines  deliberately removed
@@ -75,33 +75,54 @@ desktop/build/sidecar/xref-sidecar.html
 
 the cause is read off the deleting commit's subject. conventional commit types map
 directly (`refactor:` is "refactored out of existence", `fix:` is "was the bug",
-`revert:` is "reverted, never happened"). without a type prefix it looks for removal
-words like remove, delete, drop, prune, purge, and falls back to "unknown causes".
-a subject starting with `wip` is "died of wip". the full table is in `cause.py`.
+`revert:` and git's own `Revert "..."` are "reverted, never happened"). without a type
+prefix it looks for removal words like remove, delete, drop, prune, purge, and falls back
+to "unknown causes". a subject starting with `wip` is "died of wip". the full table is in
+`cause.py`.
 
 ## what counts as dead
 
-a file is dead when a commit on the walked history deletes it and no later commit adds
-it back at the same path. a rename (`R` in `git log -M`) keeps the birth record and adds
-the old name to `aliases`. a copy (`C`) starts a fresh birth for the copy. a file that
-existed before the available history (shallow clone) gets `????-??-??` for its birth.
+the walk is `git log --first-parent`, with each merge diffed against its first parent.
+that's the mainline: a straight line where every merged PR lands as one net change at the
+merge commit. a file is dead when a mainline commit deletes it and no later one adds it
+back at the same path.
 
-merge commits are walked but their combined diff is skipped, same as plain `git log`,
-so a deletion is attributed to the commit that actually made it. the one thing that
-hides is a deletion on a side branch that a merge conflict resolution then undid. to
-catch it, every grave is checked against the tree at HEAD (or every ref with `--all`);
-a file that is still there is marked risen, not dead.
+the straight line is what makes the numbers trustworthy. walking every commit instead
+interleaves branches, and on [hermes-agent](https://github.com/NousResearch/hermes-agent)
+that produced 11 graves with negative ages (a path added on one branch, an unrelated file
+of the same name deleted on another) and 5 files with no birth at all (created inside a
+merge conflict resolution, which plain `git log` never shows). on the mainline both
+numbers are zero.
 
-dates are committer times, which follow the commit graph through rebases and
-cherry-picks. author times don't, and produce negative ages.
+it also means a file that lived and died inside a PR branch without ever reaching main
+isn't in the graveyard. it was never on the mainline to begin with.
+
+a rename (`R` in `git log -M`) keeps the birth record and adds the old name to `aliases`.
+copies aren't detected; a copied file is just a new file. a file that existed before the
+available history (shallow clone) gets `????-??-??` for its birth. dates are committer
+times, so rebases and cherry-picks don't produce negative ages.
+
+## speed
+
+line counts are the expensive part: git has to read every deleted blob to count them.
+so counts are only computed for everything when you ask for everything. with `-n` and a
+sort other than `lines`, the big walk skips them and the shown graves get counted
+individually afterwards.
+
+| repo | commits | `-n 6` | full count |
+|---|---|---|---|
+| PromptPressure | 146 | 0.3s | 0.3s |
+| hermes-agent | 27,617 | 16s | 45s |
+| openclaw | 87,468 | 77s | 4.5 min |
+
+measured on a bare clone on a USB SSD. `--no-lines` gets you the `-n 6` time without a
+limit.
 
 ## limitations
 
-- one `git log --raw --numstat -M` over the full history. fine for tens of thousands of
-  commits, slow on the linux kernel.
-- rename detection is git's heuristic (`-M`, 50% similarity). a rewrite-and-rename will
-  show as a death plus an unrelated birth, because that is what git says happened.
-- line counts come from numstat, so binaries show as `binary` instead of a number.
+- rename detection is git's heuristic (`-M`, 50% similarity). a rewrite-and-rename shows
+  as a death plus an unrelated birth, because that's what git says happened.
+- binaries show as `binary` instead of a line count.
 - `--all` flattens every ref into one timeline. a file deleted on a feature branch but
   alive on main is reported dead. HEAD only (the default) has no such ambiguity.
 - control characters in paths, authors and commit subjects are escaped on output, so a

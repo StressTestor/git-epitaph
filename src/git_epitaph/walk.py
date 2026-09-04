@@ -27,9 +27,16 @@ class Grave:
     died_sha: str
     killer: str  # author of the deleting commit
     epitaph: str  # subject of the deleting commit
-    lines: int | None  # lines at death; None for binaries
+    lines: int | None  # lines at death; None when binary or not counted
+    binary: bool = False  # git reported "-" for the line count
+    counted: bool = True  # False when the caller skipped line counting for speed
     risen: bool = False  # exists again later in history, or still exists at HEAD
     aliases: list[str] = field(default_factory=list)
+
+    def set_lines(self, count: int | None) -> None:
+        self.lines = count
+        self.binary = count is None
+        self.counted = True
 
     @property
     def age_days(self) -> int | None:
@@ -42,8 +49,8 @@ def bury(commits: list[Commit], living: set[str] | None = None) -> list[Grave]:
     """Return every death in `commits` (oldest-first), in death order.
 
     `living` is the set of paths present at the tip of the walked history. A grave whose
-    path is in it is marked risen, which catches deaths that a merge resolution undid
-    (plain `git log` shows no diff for merge commits, so the replay cannot see those).
+    path is in it is marked risen. On a first-parent walk this should never add anything,
+    so it is a consistency check against the ledger rather than a source of truth.
     """
     alive: dict[str, Birth] = {}
     graves: list[Grave] = []
@@ -80,9 +87,13 @@ def bury(commits: list[Commit], living: set[str] | None = None) -> list[Grave]:
                     died_sha=c.sha,
                     killer=c.author,
                     epitaph=c.subject,
-                    lines=c.deleted_lines.get(ch.path),
+                    lines=None,
                     aliases=list(birth.aliases) if birth else [],
                 )
+                if ch.path in c.deleted_lines:
+                    grave.set_lines(c.deleted_lines[ch.path])
+                else:
+                    grave.counted = False
                 graves.append(grave)
                 last_grave_for[ch.path] = grave
 

@@ -99,6 +99,53 @@ def test_stones_default_and_limit(repo: Path, capsys):
     assert "legacy.py" not in out
 
 
+def test_limit_counts_lines_lazily_but_correctly(repo: Path, capsys, monkeypatch):
+    import git_epitaph.cli as cli
+
+    seen: list[bool] = []
+    real = cli.read_log
+
+    def spy(repo_, all_refs=False, count_lines=True):
+        seen.append(count_lines)
+        return real(repo_, all_refs=all_refs, count_lines=count_lines)
+
+    monkeypatch.setattr(cli, "read_log", spy)
+    assert main([str(repo), "--json", "--limit", "5", "--include-risen"]) == 0
+    assert seen == [False]  # the big walk skipped numstat
+    data = json.loads(capsys.readouterr().out)
+    legacy = next(g for g in data if g["path"] == "legacy.py")
+    assert legacy["lines"] == 20 and legacy["lines_counted"] is True
+    # the first img.png (the risen one) has a NUL byte, so git calls it binary
+    img = next(g for g in data if g["path"] == "img.png" and g["risen"])
+    assert img["lines"] is None and img["binary"] is True and img["lines_counted"] is True
+
+
+def test_sort_by_lines_forces_a_full_count(repo: Path, capsys, monkeypatch):
+    import git_epitaph.cli as cli
+
+    seen: list[bool] = []
+    real = cli.read_log
+
+    def spy(repo_, all_refs=False, count_lines=True):
+        seen.append(count_lines)
+        return real(repo_, all_refs=all_refs, count_lines=count_lines)
+
+    monkeypatch.setattr(cli, "read_log", spy)
+    assert main([str(repo), "--json", "--limit", "1", "--sort", "lines"]) == 0
+    assert seen == [True]
+    assert json.loads(capsys.readouterr().out)[0]["path"] == "legacy.py"
+
+
+def test_no_lines_skips_counting_and_says_so(repo: Path, capsys):
+    assert main([str(repo), "--no-lines", "--style", "list"]) == 0
+    out = capsys.readouterr().out
+    assert "lines lost" not in out.splitlines()[0]
+    assert "lines not counted" in out
+    assert main([str(repo), "--no-lines", "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert all(g["lines"] is None and g["lines_counted"] is False for g in data)
+
+
 def test_since_filter(repo: Path, capsys):
     assert main([str(repo), "--json", "--since", "2023-11-25"]) == 0
     data = json.loads(capsys.readouterr().out)
@@ -118,8 +165,8 @@ def test_header_counts_risen_even_though_they_are_hidden(repo: Path, capsys):
     assert "(showing 2)" in out
 
 
-def test_file_deleted_on_branch_but_kept_by_merge_is_not_dead(repo: Path, capsys):
-    # plain git log shows no diff for the merge, so only the HEAD tree reveals survival
+def _conflicting_merge(repo: Path, extra_file: str | None = None) -> str:
+    """Branch deletes keep.py, main edits it, merge keeps it. Returns the merge sha."""
     git(repo, "checkout", "-q", "-b", "purge")
     git(repo, "rm", "-q", "keep.py")
     git(repo, "commit", "-q", "-m", "chore: drop keep.py on a branch", ts=T0 + 30 * DAY)
@@ -127,19 +174,79 @@ def test_file_deleted_on_branch_but_kept_by_merge_is_not_dead(repo: Path, capsys
     (repo / "keep.py").write_text("print('still here')\n")
     git(repo, "add", "keep.py")
     git(repo, "commit", "-q", "-m", "fix: touch keep.py", ts=T0 + 31 * DAY)
-    # conflict: modify/delete. resolve by keeping the file.
-    subprocess.run(["git", "merge", "purge"], cwd=repo, capture_output=True)
+    subprocess.run(["git", "merge", "purge"], cwd=repo, capture_output=True)  # modify/delete
     git(repo, "add", "keep.py")
+    if extra_file:
+        (repo / extra_file).write_text("born in a merge\n")
+        git(repo, "add", extra_file)
     git(repo, "-c", "core.editor=true", "commit", "-q", "--no-edit", ts=T0 + 32 * DAY)
     assert (repo / "keep.py").exists()
+    return git(repo, "rev-parse", "HEAD").strip()
 
-    assert main([str(repo), "--json"]) == 0
-    dead = [g["path"] for g in json.loads(capsys.readouterr().out)]
-    assert "keep.py" not in dead
 
+def test_file_deleted_on_branch_but_kept_by_merge_never_died_on_mainline(repo: Path, capsys):
+    _conflicting_merge(repo)
     assert main([str(repo), "--json", "--include-risen"]) == 0
-    keep = [g for g in json.loads(capsys.readouterr().out) if g["path"] == "keep.py"]
-    assert len(keep) == 1 and keep[0]["risen"] is True
+    paths = [g["path"] for g in json.loads(capsys.readouterr().out)]
+    assert "keep.py" not in paths
+
+
+def test_file_born_inside_a_merge_resolution_has_a_known_birth(repo: Path, capsys):
+    merge_sha = _conflicting_merge(repo, extra_file="newborn.py")
+    git(repo, "rm", "-q", "newborn.py")
+    git(repo, "commit", "-q", "-m", "chore: remove newborn", ts=T0 + 40 * DAY)
+    assert main([str(repo), "--json", "--path", "newborn.py"]) == 0
+    (g,) = json.loads(capsys.readouterr().out)
+    assert g["born_sha"] == merge_sha
+    assert g["age_days"] == 8
+
+
+def test_branch_deletion_is_attributed_to_the_merge_that_landed_it(repo: Path, capsys):
+    git(repo, "checkout", "-q", "-b", "cleanup")
+    git(repo, "rm", "-q", "keep.py")
+    git(repo, "commit", "-q", "-m", "chore: drop keep.py", ts=T0 + 50 * DAY)
+    git(repo, "checkout", "-q", "main")
+    git(repo, "merge", "-q", "--no-ff", "-m", "Merge PR #7: cleanup", "cleanup", ts=T0 + 51 * DAY)
+    merge_sha = git(repo, "rev-parse", "HEAD").strip()
+    assert main([str(repo), "--json", "--path", "keep.py"]) == 0
+    (g,) = json.loads(capsys.readouterr().out)
+    assert g["died_sha"] == merge_sha
+    assert g["epitaph"] == "Merge PR #7: cleanup"
+    assert g["age_days"] == 51
+    assert g["lines"] == 1
+
+
+def test_same_path_added_on_two_branches_cannot_cross(repo: Path, capsys):
+    # the interleaving that produced negative ages on hermes-agent: a path added on a
+    # side branch with a later clock than the mainline deletion of an unrelated file of
+    # the same name. first-parent makes the walk linear, so age is always >= 0.
+    git(repo, "checkout", "-q", "-b", "side")
+    (repo / "dup.txt").write_text("side\n")
+    git(repo, "add", "dup.txt")
+    git(repo, "commit", "-q", "-m", "feat: side dup", ts=T0 + 90 * DAY)
+    git(repo, "checkout", "-q", "main")
+    (repo / "dup.txt").write_text("main\n")
+    git(repo, "add", "dup.txt")
+    git(repo, "commit", "-q", "-m", "feat: main dup", ts=T0 + 60 * DAY)
+    git(repo, "rm", "-q", "dup.txt")
+    git(repo, "commit", "-q", "-m", "chore: rm main dup", ts=T0 + 61 * DAY)
+    subprocess.run(
+        ["git", "merge", "--no-ff", "-m", "merge side", "side"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "GIT_COMMITTER_DATE": f"{T0 + 62 * DAY} +0000",
+            "GIT_AUTHOR_DATE": f"{T0 + 62 * DAY} +0000",
+        },
+    )
+    assert main([str(repo), "--json", "--include-risen", "--path", "dup.txt"]) == 0
+    graves = json.loads(capsys.readouterr().out)
+    assert all(g["age_days"] is not None and g["age_days"] >= 0 for g in graves)
+    (g,) = graves
+    assert g["age_days"] == 1
+    assert g["risen"] is True  # the side branch's dup.txt arrived via the merge
 
 
 def test_auto_style_picks_stones_on_a_tty_and_list_otherwise(repo: Path, capsys, monkeypatch):

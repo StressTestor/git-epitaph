@@ -152,7 +152,18 @@ def test_text_output_survives_non_utf8_filename():
 
 
 def test_summary_counts():
-    s = summary([grave(), grave(risen=True), grave(lines=None)])
+    s = summary([grave(), grave(risen=True), grave(lines=None, binary=True)])
     assert "3 buried" in s
     assert "1 risen" in s
     assert "624 lines" in s
+
+
+def test_summary_omits_lines_when_any_grave_is_uncounted():
+    s = summary([grave(), grave(lines=None, counted=False)])
+    assert s == "2 buried, 0 risen"
+
+
+def test_uncounted_stone_says_so_instead_of_binary():
+    out = render_stones([grave(lines=None, counted=False)], width=40)
+    assert "lines not counted" in out
+    assert "binary" not in out
