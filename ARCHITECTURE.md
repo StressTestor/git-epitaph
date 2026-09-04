@@ -25,14 +25,18 @@ git-epitaph/
   README.md                 user docs (joe's voice)
   ARCHITECTURE.md           this file
   LICENSE                   MIT
+  .github/workflows/
+    ci.yml                  ruff + pytest matrix, SHA-pinned actions
+    release.yml             tag -> build -> PyPI trusted publishing
   src/git_epitaph/
     __init__.py             __version__
     __main__.py             `python -m git_epitaph`
-    gitlog.py               run `git log --raw --numstat -M`, parse into Commit/Change
+    gitlog.py               first-parent `git log --raw [--numstat] -M` -> Commit/Change;
+                            `deleted_lines_in` for lazy per-commit counts
     walk.py                 replay commits, track births/renames/deaths -> Grave list
     cause.py                commit subject -> cause of death string
     render.py               stones / list / json renderers, summary line
-    cli.py                  argparse, filtering, sorting, style selection
+    cli.py                  argparse, repo root resolution, lazy line counting, output
   tests/
     test_gitlog.py          parser on captured log text (renames, binaries, quoted paths)
     test_walk.py            state machine: rename carries birth, risen, unknown birth, copy
@@ -115,8 +119,16 @@ timestamps and authors.
 
 ## deployment / ci
 
-no CI yet. release path is `uv build` then publish to PyPI as `git-epitaph`. no GitHub
-Actions in the repo at time of writing, so nothing to pin.
+- `.github/workflows/ci.yml`: ruff check, ruff format --check, pytest on ubuntu + macos,
+  python 3.10 and 3.13, `uv sync --frozen` against the lockfile.
+- `.github/workflows/release.yml`: on a `v*` tag, run tests, assert the tag matches
+  `uv version`, `uv build`, then publish to PyPI through trusted publishing (OIDC, github
+  environment `pypi`, no token stored anywhere). the pypi side needs a pending publisher
+  for owner `StressTestor`, repo `git-epitaph`, workflow `release.yml`, environment `pypi`.
+- every action is pinned to a full commit SHA with the version in a trailing comment.
+  bump by re-resolving the tag: `gh api repos/OWNER/REPO/git/ref/tags/TAG`.
+
+release: bump `version` in `pyproject.toml`, commit, `git tag vX.Y.Z`, push the tag.
 
 ## integrations
 
