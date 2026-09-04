@@ -29,14 +29,20 @@ def build_parser() -> argparse.ArgumentParser:
         description="obituaries for every file your repo has ever deleted.",
     )
     p.add_argument("repo", nargs="?", default=".", help="path inside a git repo (default: .)")
-    p.add_argument("--limit", "-n", type=int, default=None, help="show at most N graves")
+    p.add_argument("--limit", "-n", type=_non_negative, default=None, help="show at most N graves")
     p.add_argument(
         "--sort",
         choices=sorted(SORT_KEYS),
         default="died",
         help="sort key, newest/largest first (default: died)",
     )
-    p.add_argument("--since", metavar="YYYY-MM-DD", help="only deaths on or after this date")
+    p.add_argument(
+        "--since",
+        metavar="YYYY-MM-DD",
+        type=_parse_since,
+        default=None,
+        help="only deaths on or after this date (UTC)",
+    )
     p.add_argument("--path", metavar="GLOB", help="only paths matching this glob (any alias)")
     p.add_argument(
         "--style",
@@ -51,7 +57,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also show files that were deleted and later re-added",
     )
-    p.add_argument("--all", action="store_true", help="walk all refs, not just HEAD")
+    p.add_argument(
+        "--all",
+        action="store_true",
+        help="walk all refs as one timeline; a file deleted on one branch but alive on "
+        "another is reported dead",
+    )
     p.add_argument("--version", action="version", version=f"git-epitaph {__version__}")
     return p
 
@@ -60,16 +71,27 @@ def _parse_since(value: str) -> int:
     try:
         return int(datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
     except ValueError as exc:
-        raise SystemExit(f"git-epitaph: --since wants YYYY-MM-DD, got {value!r}") from exc
+        raise argparse.ArgumentTypeError(f"wants YYYY-MM-DD, got {value!r}") from exc
+
+
+def _non_negative(value: str) -> int:
+    n = int(value)
+    if n < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0, got {n}")
+    return n
 
 
 def _assert_repo(repo: Path) -> None:
+    """Accept work trees and bare repos; reject everything else before doing any work."""
     proc = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "--is-inside-work-tree"],
+        ["git", "-C", str(repo), "rev-parse", "--is-inside-work-tree", "--is-bare-repository"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
-    if proc.returncode != 0 or proc.stdout.strip() != "true":
+    flags = proc.stdout.split()
+    if proc.returncode != 0 or "true" not in flags:
         raise GitError(f"not a git repository: {repo}")
 
 
@@ -77,9 +99,8 @@ def select(graves: list[Grave], args: argparse.Namespace) -> list[Grave]:
     out = graves
     if not args.include_risen:
         out = [g for g in out if not g.risen]
-    if args.since:
-        cutoff = _parse_since(args.since)
-        out = [g for g in out if g.died >= cutoff]
+    if args.since is not None:
+        out = [g for g in out if g.died >= args.since]
     if args.path:
         pat = args.path
         out = [
@@ -103,7 +124,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"git-epitaph: {exc}", file=sys.stderr)
         return 2
 
-    graves = select(bury(commits), args)
+    all_graves = bury(commits)
+    graves = select(all_graves, args)
     shown = graves[: args.limit] if args.limit is not None else graves
 
     if args.json:
@@ -111,7 +133,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if not graves:
-        print("nothing buried here. every file ever committed is still alive.")
+        if all_graves:
+            print(f"nothing buried matches those filters ({len(all_graves)} graves in total).")
+        else:
+            print("nothing buried here. every file ever committed is still alive.")
         return 0
 
     style = args.style

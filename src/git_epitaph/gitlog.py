@@ -116,7 +116,10 @@ def read_log(repo: Path, all_refs: bool = False) -> list[Commit]:
     ]
     if all_refs:
         cmd.append("--all")
-    proc = subprocess.run(cmd, capture_output=True, text=True, errors="surrogateescape")
+    # git emits UTF-8 regardless of locale; decoding with the locale codec breaks under LANG=C.
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True, encoding="utf-8", errors="surrogateescape"
+    )
     if proc.returncode != 0:
         raise GitError(proc.stderr.strip() or f"git exited {proc.returncode}")
     return parse_log(proc.stdout)

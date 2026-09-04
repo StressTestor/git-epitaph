@@ -15,6 +15,11 @@ GAP = 2
 UNKNOWN_DATE = "????-??-??"
 
 
+def clean(text: str) -> str:
+    """Escape control characters so a hostile commit subject cannot drive the terminal."""
+    return "".join(ch if ch.isprintable() or ch == " " else repr(ch)[1:-1] for ch in text)
+
+
 def iso(ts: int | None) -> str:
     if ts is None:
         return UNKNOWN_DATE
@@ -43,7 +48,7 @@ def _stone(g: Grave) -> list[str]:
         "  /" + " " * (INNER + 2) + "\\  ",
         body("R.I.P."),
         body("(RISEN)") if g.risen else body(),
-        body(fit_path(g.path, INNER)),
+        body(fit_path(clean(g.path), INNER)),
         body(_lines_label(g.lines)),
         body(),
         body(iso(g.born)),
@@ -81,12 +86,15 @@ def _sh_quote(path: str) -> str:
 def render_list(graves: list[Grave]) -> str:
     blocks: list[str] = []
     for g in graves:
-        head = g.path
+        head = clean(g.path)
         if g.aliases:
-            head += f"  (born as {g.born_path})"
+            head += f"  (born as {clean(g.born_path)})"
         if g.risen:
             head += "  [risen]"
-        age = f"{g.age_days} days" if g.age_days is not None else "age unknown"
+        if g.age_days is None:
+            age = "age unknown"
+        else:
+            age = f"{g.age_days} day{'s' if g.age_days != 1 else ''}"
         short = g.died_sha[:12]
         blocks.append(
             "\n".join(
@@ -94,8 +102,8 @@ def render_list(graves: list[Grave]) -> str:
                     head,
                     f"  {iso(g.born)} -> {iso(g.died)}  {age}  {_lines_label(g.lines)}  "
                     f"{cause_of_death(g.epitaph)}",
-                    f"  killed by {g.killer} in {short}: {g.epitaph}",
-                    f"  git checkout {short}^ -- {_sh_quote(g.path)}",
+                    f"  killed by {clean(g.killer)} in {short}: {clean(g.epitaph)}",
+                    f"  git checkout {short}^ -- {_sh_quote(clean(g.path))}",
                 ]
             )
         )

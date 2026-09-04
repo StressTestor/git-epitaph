@@ -76,6 +76,12 @@ def test_render_list_has_resurrection_command():
     assert "400 days" in out
 
 
+def test_render_list_singular_day():
+    out = render_list([grave(died=T0 + DAY)])
+    assert "1 day " in out
+    assert "1 days" not in out
+
+
 def test_render_list_shows_aliases():
     out = render_list([grave(born_path="src/parser.py", aliases=["src/parser.py"])])
     assert "born as src/parser.py" in out
@@ -89,6 +95,24 @@ def test_to_json_roundtrips_fields():
     assert data[0]["cause"] == "refactored out of existence"
     assert data[0]["age_days"] == 400
     assert data[0]["born_iso"] == "2023-11-14"
+
+
+def test_control_characters_are_escaped_in_every_text_output():
+    hostile = grave(
+        path="evil\x1b[31m.py",
+        killer="mal\nlory",
+        epitaph="chore: rm\x07 thing\x1b]0;pwned\x07",
+    )
+    stones = render_stones([hostile], width=40)
+    listing = render_list([hostile])
+    for out in (stones, listing):
+        assert "\x1b" not in out
+        assert "\x07" not in out
+    assert "\\x1b" in listing
+    assert "mal\\nlory" in listing
+    # stone stays rectangular even with the escaped path
+    widths = {len(line) for line in stones.splitlines() if line.strip()}
+    assert len(widths) == 1
 
 
 def test_summary_counts():

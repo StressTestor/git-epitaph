@@ -53,7 +53,8 @@ def bury(commits: list[Commit]) -> list[Grave]:
             elif ch.status == "C":
                 alive[ch.path] = Birth(ch.path, c.ts, c.sha)
             elif ch.status == "R":
-                assert ch.old_path is not None
+                if ch.old_path is None:
+                    raise ValueError(f"rename without old path in {c.sha}: {ch.path}")
                 birth = alive.pop(ch.old_path, None)
                 if birth is None:
                     birth = Birth(ch.old_path, c.ts, c.sha)

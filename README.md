@@ -96,6 +96,10 @@ so a deletion is attributed to the commit that actually made it.
 - rename detection is git's heuristic (`-M`, 50% similarity). a rewrite-and-rename will
   show as a death plus an unrelated birth, because that is what git says happened.
 - line counts come from numstat, so binaries show as `binary` instead of a number.
+- `--all` flattens every ref into one timeline. a file deleted on a feature branch but
+  alive on main is reported dead. HEAD only (the default) has no such ambiguity.
+- control characters in paths, authors and commit subjects are escaped on output, so a
+  hostile clone can't drive your terminal through a commit message.
 
 ## development
 

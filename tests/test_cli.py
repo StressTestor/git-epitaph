@@ -111,6 +111,65 @@ def test_sort_by_lines(repo: Path, capsys):
     assert data[0]["path"] == "legacy.py"
 
 
+def test_bad_since_rejected_before_walking(repo: Path, capsys, monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("log walked despite bad --since")
+
+    monkeypatch.setattr("git_epitaph.cli.read_log", boom)
+    with pytest.raises(SystemExit) as exc:
+        main([str(repo), "--since", "yesterday"])
+    assert exc.value.code == 2
+    assert "YYYY-MM-DD" in capsys.readouterr().err
+
+
+def test_negative_limit_rejected(repo: Path, capsys):
+    with pytest.raises(SystemExit) as exc:
+        main([str(repo), "--limit", "-1"])
+    assert exc.value.code == 2
+    assert ">= 0" in capsys.readouterr().err
+
+
+def test_filters_that_match_nothing_say_so(repo: Path, capsys):
+    assert main([str(repo), "--path", "nope/*"]) == 0
+    out = capsys.readouterr().out
+    assert "matches those filters" in out
+    assert "still alive" not in out
+
+
+def test_bare_repo_is_accepted(repo: Path, tmp_path: Path, capsys):
+    bare = tmp_path / "bare.git"
+    git(repo, "clone", "-q", "--bare", str(repo), str(bare))
+    assert main([str(bare), "--json"]) == 0
+    assert len(json.loads(capsys.readouterr().out)) == 2
+
+
+def test_non_ascii_subject_survives_latin1_locale(repo: Path):
+    # LANG=C is coerced to UTF-8 by python itself (PEP 538), so a latin-1 locale is the
+    # one that actually decodes git's UTF-8 output wrongly without an explicit encoding.
+    (repo / "café.py").write_text("x\n")
+    git(repo, "add", "café.py")
+    git(repo, "commit", "-q", "-m", "feat: añadir café — ünïcode", ts=T0 + 20 * DAY)
+    git(repo, "rm", "-q", "café.py")
+    git(repo, "commit", "-q", "-m", "chore: quitar café — ünïcode", ts=T0 + 21 * DAY)
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("LC_", "LANG"))}
+    env.update(
+        {
+            "LANG": "en_US.ISO8859-1",
+            "LC_ALL": "en_US.ISO8859-1",
+            "PYTHONIOENCODING": "utf-8",
+        }
+    )
+    proc = subprocess.run(
+        [sys.executable, "-m", "git_epitaph", str(repo), "--style", "list", "-n", "1"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "chore: quitar café — ünïcode" in proc.stdout
+    assert "café.py" in proc.stdout
+
+
 def test_not_a_repo_fails_loudly(tmp_path: Path, capsys):
     rc = main([str(tmp_path)])
     assert rc == 2

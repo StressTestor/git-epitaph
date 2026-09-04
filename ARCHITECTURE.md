@@ -70,6 +70,11 @@ git log ──▶ gitlog.parse_log ──▶ list[Commit] ──▶ walk.bury �
 - **path quoting.** git C-quotes unusual paths (`core.quotePath`). `gitlog.unquote`
   reverses it, including octal UTF-8 escapes. output for shell use is single-quoted with
   `'\''` escaping, never `shlex.quote`, so paths are always visibly quoted.
+- **repo content is untrusted.** everything that came from git (path, author, subject)
+  passes through `render.clean()` before printing. non-printable characters become their
+  `\xNN` / `\n` escapes. JSON output is left raw because `json.dumps` already escapes.
+- **validate before work.** `--since` and `--limit` are argparse `type=` converters, so a
+  bad value exits 2 before the (possibly slow) log walk starts.
 
 ## database schema
 
@@ -99,12 +104,17 @@ git only, via subprocess. requires `git` on PATH and a repo with history.
 | test wanted "refactored out of existence" on one line | cause wraps to two 21-char rows inside the stone | assert on the two fragments |
 | a rewrite-and-rename shows as death + unrelated birth | git's `-M` similarity threshold (50%) did not link them | expected; that is what git reports |
 | `hatchling` editable build fails with "Readme file does not exist" | `readme = "README.md"` in pyproject before the file existed | README must exist before `uv sync` |
+| non-ASCII subjects come out as `cafÃ©` under a latin-1 locale | `subprocess.run(text=True)` decodes with the locale codec; git emits UTF-8 | `encoding="utf-8"` on the git call; test pinned with `LANG=en_US.ISO8859-1` (`LANG=C` is coerced to UTF-8 by python and does not reproduce) |
+| commit subject with `\x1b[...` drives the terminal | output printed raw | `render.clean()` escapes every non-printable char in path/author/subject |
+| bad `--since` only errored after the full log walk | validation lived in `select()` | `--since` and `--limit` are argparse `type=` callbacks, so argparse exits 2 before git runs |
+| "every file is still alive" printed when filters matched nothing | one empty-check for two situations | separate message when `all_graves` is non-empty |
+| bare repo reported as "not a git repository" | only `--is-inside-work-tree` was checked | also accept `--is-bare-repository` |
 
 ## commands
 
 ```
 uv sync                                   # create .venv with dev deps
-uv run pytest                             # 52 tests
+uv run pytest                             # 59 tests
 uv run ruff check . && uv run ruff format --check .
 uv run git-epitaph <repo> -n 5            # try it
 uv build                                  # sdist + wheel
