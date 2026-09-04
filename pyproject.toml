@@ -1,0 +1,44 @@
+[project]
+name = "git-epitaph"
+version = "0.1.0"
+description = "obituaries for every file your repo has ever deleted. offline, stdlib only."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "joe" }]
+keywords = ["git", "history", "deleted-files", "cli", "tombstone"]
+classifiers = [
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Version Control :: Git",
+]
+dependencies = []
+
+[project.scripts]
+git-epitaph = "git_epitaph.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/StressTestor/git-epitaph"
+
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/git_epitaph"]
+
+[dependency-groups]
+dev = ["pytest==8.4.1", "ruff==0.12.7"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
