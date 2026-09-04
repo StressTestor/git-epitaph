@@ -25,9 +25,10 @@ def git(repo: Path, *args: str, ts: int | None = None) -> str:
     if ts is not None:
         env["GIT_AUTHOR_DATE"] = f"{ts} +0000"
         env["GIT_COMMITTER_DATE"] = f"{ts} +0000"
-    return subprocess.run(
-        ["git", *args], cwd=repo, env=env, check=True, capture_output=True, text=True
-    ).stdout
+    proc = subprocess.run(["git", *args], cwd=repo, env=env, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise AssertionError(f"git {' '.join(args)} exited {proc.returncode}:\n{proc.stderr}")
+    return proc.stdout
 
 
 @pytest.fixture
@@ -243,7 +244,10 @@ def _conflicting_merge(repo: Path, extra_file: str | None = None) -> str:
     (repo / "keep.py").write_text("print('still here')\n")
     git(repo, "add", "keep.py")
     git(repo, "commit", "-q", "-m", "fix: touch keep.py", ts=T0 + 31 * DAY)
-    subprocess.run(["git", "merge", "purge"], cwd=repo, capture_output=True)  # modify/delete
+    merge = subprocess.run(["git", "merge", "purge"], cwd=repo, capture_output=True, text=True)
+    assert merge.returncode == 1 and "CONFLICT (modify/delete)" in merge.stdout, (
+        merge.stdout + merge.stderr
+    )
     git(repo, "add", "keep.py")
     if extra_file:
         (repo / extra_file).write_text("born in a merge\n")
